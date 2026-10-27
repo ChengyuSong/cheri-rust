@@ -1841,7 +1841,11 @@ pub fn build_target_config(
                 early_dcx.early_warn(warning)
             }
 
-            if !matches!(target.pointer_width, 16 | 32 | 64) {
+            // CHERI targets have capability pointers wider than their address width
+            // (e.g. 128-bit capabilities with 64-bit addresses on CHERI-RISC-V RV64).
+            let valid_width = matches!(target.pointer_width, 16 | 32 | 64)
+                || (target.is_like_cheri && target.pointer_width == 128);
+            if !valid_width {
                 early_dcx.early_fatal(format!(
                     "target specification was invalid: unrecognized target-pointer-width {}",
                     target.pointer_width

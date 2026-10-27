@@ -1521,6 +1521,10 @@ unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, bytes: NonZero<usize
                 }
             )+};
         }
+        // CHERI RV64: pointer-sized chunks are 16 bytes (capabilities), so the tail can be 15.
+        #[cfg(target_pointer_width = "128")]
+        swap_prefix!(8 4 2 1);
+        #[cfg(not(target_pointer_width = "128"))]
         swap_prefix!(4 2 1);
         debug_assert_eq!(i, bytes);
     }
@@ -1536,7 +1540,7 @@ unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, bytes: NonZero<usize
         unsafe { swap_nonoverlapping_chunks::<CHUNK_SIZE>(x.cast(), y.cast(), chunks) };
     }
     if let Some(tail) = NonZero::new(tail) {
-        const { assert!(CHUNK_SIZE <= 8) };
+        const { assert!(CHUNK_SIZE <= 8 || (cfg!(target_pointer_width = "128") && CHUNK_SIZE <= 16)) };
         let delta = chunks * CHUNK_SIZE;
         // SAFETY: the tail length is below CHUNK SIZE because of the remainder,
         // and CHUNK_SIZE is at most 8 by the const assert, so tail <= 7

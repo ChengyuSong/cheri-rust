@@ -1563,6 +1563,7 @@ supported_targets! {
 
     ("riscv32cheriot-unknown-cheriotrtos", riscv32cheriot_unknown_cheriotrtos),
     ("riscv32cheriot-unknown-cheriotrtos.facade", riscv32cheriot_unknown_cheriotrtos_facade),
+    ("riscv64cheri-unknown-none-purecap", riscv64cheri_unknown_none_purecap),
     ("riscv32e-unknown-none-elf", riscv32e_unknown_none_elf),
     ("riscv32em-unknown-none-elf", riscv32em_unknown_none_elf),
     ("riscv32emc-unknown-none-elf", riscv32emc_unknown_none_elf),
@@ -1956,6 +1957,7 @@ crate::target_spec_enum! {
         Llvm = "llvm",
         MacAbi = "macabi",
         Pauthtest = "pauthtest",
+        Purecap = "purecap",
         Sim = "sim",
         SoftFloat = "softfloat",
         Spe = "spe",
@@ -1990,6 +1992,10 @@ crate::target_spec_enum! {
         Lp64e = "lp64e",
         Lp64s = "lp64s",
         CHERIoT = "cheriot",
+        // CHERI-RISC-V (ISAv9) pure-capability ABIs
+        L64pc128 = "l64pc128",
+        L64pc128f = "l64pc128f",
+        L64pc128d = "l64pc128d",
         // MIPS
         O32 = "o32",
         N32 = "n32",

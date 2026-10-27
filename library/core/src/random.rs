@@ -258,5 +258,5 @@ impl_range!(u64, i64 as u64 => bounded64);
 impl_range!(u128, i128 as u128 => bounded128);
 #[cfg(any(target_pointer_width = "16", target_pointer_width = "32",))]
 impl_range!(usize, isize as u32 => bounded32);
-#[cfg(target_pointer_width = "64")]
+#[cfg(any(target_pointer_width = "64", target_pointer_width = "128"))]
 impl_range!(usize, isize as u64 => bounded64);

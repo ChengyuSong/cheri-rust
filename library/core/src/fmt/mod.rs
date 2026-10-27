@@ -906,6 +906,11 @@ impl<'a> Arguments<'a> {
             {
                 crate::mem::transmute::<_, u64>(self.args) as usize
             }
+            // CHERI-RISC-V RV64: 128-bit capability, address in the low 64 bits.
+            #[cfg(all(not(target_family = "cheriot"), target_pointer_width = "128"))]
+            {
+                crate::mem::transmute::<_, u128>(self.args) as usize
+            }
         };
 
         if bits & 1 == 1 {

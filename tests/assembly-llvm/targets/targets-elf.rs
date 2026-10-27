@@ -475,6 +475,9 @@
 //@ revisions: riscv32cheriot_unknown_cheriotrtos_facade
 //@ [riscv32cheriot_unknown_cheriotrtos_facade] compile-flags: --target riscv32cheriot-unknown-cheriotrtos.facade
 //@ [riscv32cheriot_unknown_cheriotrtos_facade] needs-llvm-components: riscv
+//@ revisions: riscv64cheri_unknown_none_purecap
+//@ [riscv64cheri_unknown_none_purecap] compile-flags: --target riscv64cheri-unknown-none-purecap
+//@ [riscv64cheri_unknown_none_purecap] needs-llvm-components: riscv
 //@ revisions: riscv32em_unknown_none_elf
 //@ [riscv32em_unknown_none_elf] compile-flags: --target riscv32em-unknown-none-elf
 //@ [riscv32em_unknown_none_elf] needs-llvm-components: riscv

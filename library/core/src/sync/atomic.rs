@@ -363,6 +363,8 @@ impl_atomic_primitive!([T] *mut T as Align2<*mut T>, size("ptr"));
 impl_atomic_primitive!([T] *mut T as Align4<*mut T>, size("ptr"));
 #[cfg(target_pointer_width = "64")]
 impl_atomic_primitive!([T] *mut T as Align8<*mut T>, size("ptr"));
+#[cfg(target_pointer_width = "128")]
+impl_atomic_primitive!([T] *mut T as Align16<*mut T>, size("ptr"));
 
 /// A memory location which can be safely modified from multiple threads.
 ///
