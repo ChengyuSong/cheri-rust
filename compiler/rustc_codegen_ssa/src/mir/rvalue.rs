@@ -1129,8 +1129,7 @@ pub(super) fn transmute_scalar<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         (Int(..) | Float(_), Int(..) | Float(_)) => bx.bitcast(imm, to_backend_ty),
         (Pointer(..), Pointer(..)) => bx.pointercast(imm, to_backend_ty),
         (Int(i, _), Pointer(..))
-            if bx.tcx().sess.target.is_like_cheri
-                && i.size() > bx.data_layout().address_size() =>
+            if bx.tcx().sess.target.is_like_cheri && i.size() > bx.data_layout().address_size() =>
         {
             // CHERI: an integer wider than the address (e.g. u128 on a 128-bit capability
             // target) cannot be `inttoptr`'d directly; only the address part is meaningful.
@@ -1139,8 +1138,7 @@ pub(super) fn transmute_scalar<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         }
         (Int(..), Pointer(..)) => bx.inttoptr(imm, to_backend_ty),
         (Pointer(..), Int(i, _))
-            if bx.tcx().sess.target.is_like_cheri
-                && i.size() > bx.data_layout().address_size() =>
+            if bx.tcx().sess.target.is_like_cheri && i.size() > bx.data_layout().address_size() =>
         {
             // CHERI: `ptrtoint` to an integer wider than the address is invalid; take the
             // address and zero-extend it (the capability metadata is not representable).

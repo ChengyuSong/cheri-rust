@@ -465,13 +465,12 @@ where
     let xlen = riscv_xlen(cx);
 
     // Not applied to CHERIoT, to keep its existing (clang-matching) C ABI lowering unchanged.
-    let cap_bits = if cx.target_spec().is_like_cheri
-        && cx.target_spec().llvm_abiname != LlvmAbi::CHERIoT
-    {
-        cx.data_layout().pointer_size().bits()
-    } else {
-        0
-    };
+    let cap_bits =
+        if cx.target_spec().is_like_cheri && cx.target_spec().llvm_abiname != LlvmAbi::CHERIoT {
+            cx.data_layout().pointer_size().bits()
+        } else {
+            0
+        };
 
     let mut avail_gprs = 8;
     let mut avail_fprs = 8;

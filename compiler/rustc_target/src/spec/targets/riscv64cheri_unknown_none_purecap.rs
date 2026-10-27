@@ -11,8 +11,8 @@ pub(crate) fn target() -> Target {
         // Must match clang's data layout for `-mabi=l64pc128d`: 128-bit capabilities with a 64-bit
         // address/index width in address space 200, which is also the alloca, program and
         // globals address space.
-        data_layout: "e-m:e-p:64:64-pfe200:128:128:128:64-i64:64-i128:128-n32:64-S128-A200-P200-G200"
-            .into(),
+        data_layout:
+            "e-m:e-p:64:64-pfe200:128:128:128:64-i64:64-i128:128-n32:64-S128-A200-P200-G200".into(),
         llvm_target: "riscv64-unknown-elf".into(),
         metadata: TargetMetadata {
             description: Some("Bare RISC-V (RV64GC) CHERI pure-capability (ISAv9)".into()),
