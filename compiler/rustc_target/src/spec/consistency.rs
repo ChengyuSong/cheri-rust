@@ -404,7 +404,10 @@ impl Target {
                     (LlvmAbi::Lp64, CfgAbi::Unspecified | CfgAbi::Other(_))
                         | (LlvmAbi::Lp64f, CfgAbi::Unspecified | CfgAbi::Other(_))
                         | (LlvmAbi::Lp64d, CfgAbi::Unspecified | CfgAbi::Other(_))
-                        | (LlvmAbi::Lp64e, CfgAbi::Unspecified | CfgAbi::Other(_)),
+                        | (LlvmAbi::Lp64e, CfgAbi::Unspecified | CfgAbi::Other(_))
+                        | (LlvmAbi::L64pc128, CfgAbi::Purecap)
+                        | (LlvmAbi::L64pc128f, CfgAbi::Purecap)
+                        | (LlvmAbi::L64pc128d, CfgAbi::Purecap),
                     "invalid RISC-V ABI name and `cfg(target_abi)` combination:\n\
                      ABI name: {}\n\
                      cfg(target_abi): {}",

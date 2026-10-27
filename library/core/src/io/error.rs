@@ -8,11 +8,11 @@
 // Therefore, the packed representation is explicitly disabled for UEFI
 // targets, and the unpacked representation must be used instead.
 #[cfg_attr(
-    all(target_address_width = "64", not(target_os = "uefi")),
+    all(target_address_width = "64", not(target_os = "uefi"), not(target_family = "cheri")),
     path = "error/repr_bitpacked.rs"
 )]
 #[cfg_attr(
-    not(all(target_address_width = "64", not(target_os = "uefi"))),
+    not(all(target_address_width = "64", not(target_os = "uefi"), not(target_family = "cheri"))),
     path = "error/repr_unpacked.rs"
 )]
 mod repr;

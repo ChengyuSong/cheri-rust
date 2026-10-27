@@ -1381,15 +1381,15 @@ impl Target {
                 // RISC-V handles ABI in a very sane way, being fully explicit via `llvm_abiname`
                 // about what the intended ABI is.
                 match &self.llvm_abiname {
-                    LlvmAbi::Ilp32d | LlvmAbi::Lp64d => {
+                    LlvmAbi::Ilp32d | LlvmAbi::Lp64d | LlvmAbi::L64pc128d => {
                         // Requires d (which implies f), incompatible with e and zfinx.
                         FeatureConstraints { required: &["d"], incompatible: &["e", "zfinx"] }
                     }
-                    LlvmAbi::Ilp32f | LlvmAbi::Lp64f => {
+                    LlvmAbi::Ilp32f | LlvmAbi::Lp64f | LlvmAbi::L64pc128f => {
                         // Requires f, incompatible with e and zfinx.
                         FeatureConstraints { required: &["f"], incompatible: &["e", "zfinx"] }
                     }
-                    LlvmAbi::Ilp32 | LlvmAbi::Lp64 => {
+                    LlvmAbi::Ilp32 | LlvmAbi::Lp64 | LlvmAbi::L64pc128 => {
                         // Requires nothing, incompatible with e.
                         FeatureConstraints { required: &[], incompatible: &["e"] }
                     }

@@ -1128,7 +1128,23 @@ pub(super) fn transmute_scalar<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     imm = match (from_scalar.primitive(), to_scalar.primitive()) {
         (Int(..) | Float(_), Int(..) | Float(_)) => bx.bitcast(imm, to_backend_ty),
         (Pointer(..), Pointer(..)) => bx.pointercast(imm, to_backend_ty),
+        (Int(i, _), Pointer(..))
+            if bx.tcx().sess.target.is_like_cheri && i.size() > bx.data_layout().address_size() =>
+        {
+            // CHERI: an integer wider than the address (e.g. u128 on a 128-bit capability
+            // target) cannot be `inttoptr`'d directly; only the address part is meaningful.
+            let addr = bx.trunc(imm, bx.cx().type_isize());
+            bx.inttoptr(addr, to_backend_ty)
+        }
         (Int(..), Pointer(..)) => bx.inttoptr(imm, to_backend_ty),
+        (Pointer(..), Int(i, _))
+            if bx.tcx().sess.target.is_like_cheri && i.size() > bx.data_layout().address_size() =>
+        {
+            // CHERI: `ptrtoint` to an integer wider than the address is invalid; take the
+            // address and zero-extend it (the capability metadata is not representable).
+            let addr = bx.ptrtoint(imm, bx.cx().type_isize());
+            bx.zext(addr, to_backend_ty)
+        }
         (Pointer(..), Int(..)) => {
             // FIXME: this exposes the provenance, which shouldn't be necessary.
             bx.ptrtoint(imm, to_backend_ty)

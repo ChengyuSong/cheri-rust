@@ -213,13 +213,23 @@ where
     }
 }
 
-fn classify_ret<'a, Ty, C>(cx: &C, arg: &mut ArgAbi<'a, Ty>, xlen: u64, flen: u64) -> bool
+fn classify_ret<'a, Ty, C>(
+    cx: &C,
+    arg: &mut ArgAbi<'a, Ty>,
+    xlen: u64,
+    flen: u64,
+    cap_bits: u64,
+) -> bool
 where
     Ty: TyAbiInterface<'a, C> + Copy,
 {
     if !arg.layout.is_sized() {
         // Not touching this...
         return false; // I guess? return value of this function is not documented
+    }
+    if may_hold_capability(arg, cap_bits) {
+        arg.make_indirect();
+        return true;
     }
     if let Some(conv) = should_use_fp_conv(cx, &arg.layout, xlen, flen) {
         match conv {
@@ -285,6 +295,7 @@ fn classify_arg<'a, Ty, C>(
     arg: &mut ArgAbi<'a, Ty>,
     xlen: u64,
     flen: u64,
+    cap_bits: u64,
     is_vararg: bool,
     avail_gprs: &mut u64,
     avail_fprs: &mut u64,
@@ -294,6 +305,11 @@ fn classify_arg<'a, Ty, C>(
     if !arg.layout.is_sized() {
         // FIXME: Update avail_gprs?
         // Not touching this...
+        return;
+    }
+    if may_hold_capability(arg, cap_bits) {
+        arg.make_indirect();
+        *avail_gprs = (*avail_gprs).saturating_sub(1);
         return;
     }
     if arg.layout.pass_indirectly_in_non_rustic_abis(cx) {
@@ -400,6 +416,17 @@ fn classify_arg<'a, Ty, C>(
     }
 }
 
+/// CHERI: an aggregate that is at least capability-sized and capability-aligned may contain a
+/// capability. The integer-register casts below would strip its tag, so such aggregates are
+/// passed indirectly instead. (This is conservative and does not match the CHERI clang ABI,
+/// which passes small capability-carrying structs in capability registers.)
+fn may_hold_capability<Ty>(arg: &ArgAbi<'_, Ty>, cap_bits: u64) -> bool {
+    cap_bits != 0
+        && is_riscv_aggregate(arg)
+        && arg.layout.size.bits() >= cap_bits
+        && arg.layout.align.abi.bits() >= cap_bits
+}
+
 fn extend_integer_width<Ty>(arg: &mut ArgAbi<'_, Ty>, xlen: u64) {
     if let BackendRepr::Scalar(scalar) = arg.layout.backend_repr
         && let Primitive::Int(i, _) = scalar.primitive()
@@ -414,22 +441,41 @@ fn extend_integer_width<Ty>(arg: &mut ArgAbi<'_, Ty>, xlen: u64) {
     arg.extend_integer_width_to(xlen);
 }
 
+/// XLEN is the integer register width. On CHERI-RISC-V the (capability) pointer is wider than
+/// XLEN, so use the address (index) width, which equals the pointer width on non-CHERI targets.
+/// CHERIoT keeps its historical behaviour (pointer width) to avoid changing its C ABI here.
+fn riscv_xlen<C: HasDataLayout + HasTargetSpec>(cx: &C) -> u64 {
+    if cx.target_spec().llvm_abiname == LlvmAbi::CHERIoT {
+        cx.data_layout().pointer_size().bits()
+    } else {
+        cx.data_layout().address_size().bits()
+    }
+}
+
 pub(crate) fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
 where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout + HasTargetSpec,
 {
     let flen = match &cx.target_spec().llvm_abiname {
-        LlvmAbi::Ilp32f | LlvmAbi::Lp64f => 32,
-        LlvmAbi::Ilp32d | LlvmAbi::Lp64d => 64,
+        LlvmAbi::Ilp32f | LlvmAbi::Lp64f | LlvmAbi::L64pc128f => 32,
+        LlvmAbi::Ilp32d | LlvmAbi::Lp64d | LlvmAbi::L64pc128d => 64,
         _ => 0,
     };
-    let xlen = cx.data_layout().pointer_size().bits();
+    let xlen = riscv_xlen(cx);
+
+    // Not applied to CHERIoT, to keep its existing (clang-matching) C ABI lowering unchanged.
+    let cap_bits =
+        if cx.target_spec().is_like_cheri && cx.target_spec().llvm_abiname != LlvmAbi::CHERIoT {
+            cx.data_layout().pointer_size().bits()
+        } else {
+            0
+        };
 
     let mut avail_gprs = 8;
     let mut avail_fprs = 8;
 
-    if !fn_abi.ret.is_ignore() && classify_ret(cx, &mut fn_abi.ret, xlen, flen) {
+    if !fn_abi.ret.is_ignore() && classify_ret(cx, &mut fn_abi.ret, xlen, flen, cap_bits) {
         avail_gprs -= 1;
     }
 
@@ -442,6 +488,7 @@ where
             arg,
             xlen,
             flen,
+            cap_bits,
             i >= fn_abi.fixed_count as usize,
             &mut avail_gprs,
             &mut avail_fprs,
@@ -454,7 +501,7 @@ where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout + HasTargetSpec,
 {
-    let xlen = cx.data_layout().pointer_size().bits();
+    let xlen = riscv_xlen(cx);
 
     for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {

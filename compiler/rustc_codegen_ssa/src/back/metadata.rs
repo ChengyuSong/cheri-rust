@@ -343,6 +343,18 @@ pub(super) fn elf_e_flags(architecture: Architecture, sess: &Session) -> u32 {
                 LlvmAbi::Ilp32d | LlvmAbi::Lp64d => e_flags |= elf::EF_RISCV_FLOAT_ABI_DOUBLE,
                 // Note that the `lp64e` is still unstable as it's not (yet) part of the ELF psABI.
                 LlvmAbi::Ilp32e | LlvmAbi::Lp64e => e_flags |= elf::EF_RISCV_RVE,
+                // CHERI-RISC-V (ISAv9) purecap: must match LLVM's RISCVELFStreamer, which sets
+                // EF_RISCV_CHERIABI for purecap ABIs and EF_RISCV_CAPMODE when +xcheripurecap
+                // (capability-mode encoding) is enabled.
+                LlvmAbi::L64pc128 | LlvmAbi::L64pc128f | LlvmAbi::L64pc128d => {
+                    e_flags |= elf::EF_RISCV_CHERIABI;
+                    e_flags |= elf::EF_RISCV_CAPMODE;
+                    match &sess.target.llvm_abiname {
+                        LlvmAbi::L64pc128f => e_flags |= elf::EF_RISCV_FLOAT_ABI_SINGLE,
+                        LlvmAbi::L64pc128d => e_flags |= elf::EF_RISCV_FLOAT_ABI_DOUBLE,
+                        _ => (),
+                    }
+                }
                 LlvmAbi::CHERIoT => {
                     e_flags |= elf::EF_RISCV_CHERIABI;
                     e_flags |= elf::EF_RISCV_CAPMODE;

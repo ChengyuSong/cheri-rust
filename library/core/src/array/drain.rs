@@ -92,6 +92,11 @@ where
                     {
                         transmute::<_, u64>(self.end_or_len) as usize
                     }
+                    // CHERI-RISC-V RV64: 128-bit capability, address in the low 64 bits.
+                    #[cfg(all(not(target_family = "cheriot"), target_pointer_width = "128"))]
+                    {
+                        transmute::<_, u128>(self.end_or_len) as usize
+                    }
                 }
             };
             // SAFETY:
@@ -134,6 +139,10 @@ const impl<T: [const] Destruct, F> Drop for Drain<'_, '_, T, F> {
                         #[cfg(target_family = "cheriot")]
                         {
                             transmute::<_, u64>(self.end_or_len) as usize
+                        }
+                        #[cfg(all(not(target_family = "cheriot"), target_pointer_width = "128"))]
+                        {
+                            transmute::<_, u128>(self.end_or_len) as usize
                         }
                     }
                 },

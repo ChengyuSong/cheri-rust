@@ -932,9 +932,14 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                     assert!(is_indirect_not_on_stack);
 
                     let size = arg.layout.size;
-                    if arg.layout.is_sized()
-                        && size <= Primitive::Pointer(dl.default_address_space).in_memory_size(cx)
-                    {
+                    let ptr_size = Primitive::Pointer(dl.default_address_space).in_memory_size(cx);
+                    // On CHERI, an aggregate of (at least) capability size and alignment may hold
+                    // a capability (e.g. `MaybeUninit<*const T>`); casting it to an integer would
+                    // strip the tag, so keep it indirect.
+                    let may_hold_capability = cx.target_spec().is_like_cheri
+                        && size == ptr_size
+                        && arg.layout.align.abi.bytes() >= ptr_size.bytes();
+                    if arg.layout.is_sized() && size <= ptr_size && !may_hold_capability {
                         // We want to pass small aggregates as immediates, but using
                         // an LLVM aggregate type for this leads to bad optimizations,
                         // so we pick an appropriately sized integer type instead.
