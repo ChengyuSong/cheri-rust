@@ -1,1 +1,4 @@
 error: `-Z cheri-cap-bounds-checks` is only supported on CHERI purecap targets
+
+error: aborting due to 1 previous error
+

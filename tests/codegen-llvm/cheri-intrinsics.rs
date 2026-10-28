@@ -43,36 +43,36 @@ pub unsafe fn cheri_intrinsics(x: u32) {
 // Since some functions will be inlined and others won't,
 // we simply check for the intrinsics to be declared.
 
-// CHECK: declare i1 @llvm.cheri.cap.subset.test(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i1 @llvm.cheri.cap.subset.test(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare i1 @llvm.cheri.cap.equal.exact(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i1 @llvm.cheri.cap.equal.exact(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare ptr addrspace(200) @llvm.cheri.cap.seal(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare ptr addrspace(200) @llvm.cheri.cap.seal(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare ptr addrspace(200) @llvm.cheri.cap.unseal(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare ptr addrspace(200) @llvm.cheri.cap.unseal(ptr addrspace(200), ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare i1 @llvm.cheri.cap.tag.get(ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i1 @llvm.cheri.cap.tag.get(ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare ptr addrspace(200) @llvm.cheri.cap.tag.clear(ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare ptr addrspace(200) @llvm.cheri.cap.tag.clear(ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare ptr addrspace(200) @llvm.cheri.cap.bounds.set.i32(ptr addrspace(200), i32) addrspace(200)
+// CHECK-DAG: declare ptr addrspace(200) @llvm.cheri.cap.bounds.set.i32(ptr addrspace(200), i32) addrspace(200)
 
-// CHECK: declare i32 @llvm.cheri.cap.length.get.i32(ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i32 @llvm.cheri.cap.length.get.i32(ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare ptr addrspace(200) @llvm.cheri.cap.address.set.i32(ptr addrspace(200), i32) addrspace(200)
+// CHECK-DAG: declare ptr addrspace(200) @llvm.cheri.cap.address.set.i32(ptr addrspace(200), i32) addrspace(200)
 
-// CHECK: declare ptr addrspace(200) @llvm.cheri.cap.perms.and.i32(ptr addrspace(200), i32) addrspace(200)
+// CHECK-DAG: declare ptr addrspace(200) @llvm.cheri.cap.perms.and.i32(ptr addrspace(200), i32) addrspace(200)
 
-// CHECK: declare i32 @llvm.cheri.cap.perms.get.i32(ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i32 @llvm.cheri.cap.perms.get.i32(ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare ptr addrspace(200) @llvm.cheri.cap.bounds.set.exact.i32(ptr addrspace(200), i32) addrspace(200)
+// CHECK-DAG: declare ptr addrspace(200) @llvm.cheri.cap.bounds.set.exact.i32(ptr addrspace(200), i32) addrspace(200)
 
-// CHECK: declare i32 @llvm.cheri.cap.top.get.i32(ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i32 @llvm.cheri.cap.top.get.i32(ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare i32 @llvm.cheri.cap.base.get.i32(ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i32 @llvm.cheri.cap.base.get.i32(ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare i32 @llvm.cheri.cap.type.get.i32(ptr addrspace(200)) addrspace(200)
+// CHECK-DAG: declare i32 @llvm.cheri.cap.type.get.i32(ptr addrspace(200)) addrspace(200)
 
-// CHECK: declare i32 @llvm.cheri.round.representable.length.i32(i32) addrspace(200)
+// CHECK-DAG: declare i32 @llvm.cheri.round.representable.length.i32(i32) addrspace(200)
 
-// CHECK: declare i32 @llvm.cheri.representable.alignment.mask.i32(i32) addrspace(200)
+// CHECK-DAG: declare i32 @llvm.cheri.representable.alignment.mask.i32(i32) addrspace(200)
