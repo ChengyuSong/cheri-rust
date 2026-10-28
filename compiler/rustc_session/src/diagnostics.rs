@@ -411,6 +411,14 @@ pub(crate) struct SmallDataThresholdNotSupportedForTarget<'a> {
 pub(crate) struct BranchProtectionRequiresAArch64;
 
 #[derive(Diagnostic)]
+#[diag("`-Z cheri-cap-bounds-checks` is only supported on CHERI purecap targets")]
+pub(crate) struct CheriCapBoundsChecksRequiresPurecap;
+
+#[derive(Diagnostic)]
+#[diag("`-Z cheri-drop-bounds-checks` is unsound and only supported on CHERI purecap targets")]
+pub(crate) struct CheriDropBoundsChecksRequiresPurecap;
+
+#[derive(Diagnostic)]
 #[diag("`-Csplit-debuginfo={$debuginfo}` is unstable on this platform")]
 pub(crate) struct SplitDebugInfoUnstablePlatform {
     pub(crate) debuginfo: SplitDebuginfo,

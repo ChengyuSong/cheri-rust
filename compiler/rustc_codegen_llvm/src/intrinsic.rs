@@ -179,6 +179,50 @@ impl<'ll, 'tcx> Builder<'_, 'll, 'tcx> {
     }
 }
 
+/// Lower `cheri_bounds_narrow`, `cheri_bounds_narrow_exact`, and `cheri_invalidate`.
+///
+/// Wide pointers keep their metadata. Non-CHERI targets return the data pointer unchanged,
+/// matching CTFE and Miri. The length operand is the address-width integer that
+/// `llvm.cheri.cap.bounds.set` is overloaded on (`i64` on RV64 purecap, `i32` on CHERIoT).
+fn codegen_cheri_cap_intrinsic<'ll, 'tcx>(
+    bx: &mut Builder<'_, 'll, 'tcx>,
+    name: Symbol,
+    args: &[OperandRef<'tcx, &'ll Value>],
+) -> IntrinsicResult<'tcx, &'ll Value> {
+    let (data, meta) = match args[0].val {
+        OperandValue::Immediate(data) => (data, None),
+        OperandValue::Pair(data, meta) => (data, Some(meta)),
+        OperandValue::Ref(_) | OperandValue::ZeroSized => {
+            bug!("cheri capability intrinsic expects a pointer immediate");
+        }
+    };
+
+    let out = if !bx.sess().target.is_like_cheri {
+        data
+    } else if name == sym::cheri_invalidate {
+        bx.call_intrinsic("llvm.cheri.cap.tag.clear", &[], &[data])
+    } else {
+        // `usize` is address-width, which is the overloaded integer type of bounds.set
+        // (`.i64` on RV64 purecap, `.i32` on CHERIoT).
+        let len = args[1].immediate();
+        // `.exact` clears the tag when the bounds are not representable (rv64 ISAv9 on
+        // QEMU-CHERI and Toooba); it does not trap. A later static choice of `.exact`
+        // must not trust LLVM's RV64 `getAlignmentMask`: it is one bit too weak just
+        // below powers of two from 8 KiB (len 0x1ff9: LLVM says 8 bytes, hardware 16).
+        let intrinsic = if name == sym::cheri_bounds_narrow_exact {
+            "llvm.cheri.cap.bounds.set.exact"
+        } else {
+            "llvm.cheri.cap.bounds.set"
+        };
+        bx.call_intrinsic(intrinsic, &[bx.type_isize()], &[data, len])
+    };
+
+    IntrinsicResult::Operand(match meta {
+        None => OperandValue::Immediate(out),
+        Some(meta) => OperandValue::Pair(out, meta),
+    })
+}
+
 impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
     fn codegen_intrinsic_call(
         &mut self,
@@ -833,6 +877,9 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             sym::cheri_without_provenance => {
                 let arg = args[0].immediate();
                 self.inttoptr(arg, self.type_ptr())
+            }
+            sym::cheri_bounds_narrow | sym::cheri_bounds_narrow_exact | sym::cheri_invalidate => {
+                return codegen_cheri_cap_intrinsic(self, name, args);
             }
 
             _ if name.as_str().starts_with("simd_") => {

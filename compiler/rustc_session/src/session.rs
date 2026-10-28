@@ -36,9 +36,9 @@ use rustc_target::spec::{
 use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
 use crate::config::{
-    self, BranchProtection, Cfg, CheckCfg, CoverageLevel, CoverageOptions, DebugInfo,
-    ErrorOutputType, FunctionReturn, Input, InstrumentCoverage, InstrumentMcount, LtoCli,
-    NATIVE_CPU, OutFileName, OutputType, PAuthKey, PointerAuthOption, SwitchWithOptPath,
+    self, BranchProtection, Cfg, CheckCfg, CheriCapBoundsChecks, CoverageLevel, CoverageOptions,
+    DebugInfo, ErrorOutputType, FunctionReturn, Input, InstrumentCoverage, InstrumentMcount,
+    LtoCli, NATIVE_CPU, OutFileName, OutputType, PAuthKey, PointerAuthOption, SwitchWithOptPath,
 };
 use crate::filesearch::FileSearch;
 use crate::lint::LintId;
@@ -1528,6 +1528,11 @@ pub fn generate_proc_macro_decls_symbol(stable_crate_id: StableCrateId) -> Strin
     format!("__rustc_proc_macro_decls_{:08x}__", stable_crate_id.as_u64())
 }
 
+/// Pure-capability CHERI: RV64 purecap and CHERIoT. Hybrid ABIs are not included.
+fn target_is_cheri_purecap(target: &Target) -> bool {
+    target.is_like_cheri && matches!(target.cfg_abi, CfgAbi::Purecap | CfgAbi::CHERIoT)
+}
+
 /// Validate command line arguments with a `Session`.
 ///
 /// If it is useful to have a Session available already for validating a commandline argument, you
@@ -1729,6 +1734,15 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
 
     if sess.opts.unstable_opts.branch_protection.is_some() && sess.target.arch != Arch::AArch64 {
         sess.dcx().emit_err(diagnostics::BranchProtectionRequiresAArch64);
+    }
+
+    if sess.opts.unstable_opts.cheri_cap_bounds_checks != CheriCapBoundsChecks::Off
+        && !target_is_cheri_purecap(&sess.target)
+    {
+        sess.dcx().emit_err(diagnostics::CheriCapBoundsChecksRequiresPurecap);
+    }
+    if sess.opts.unstable_opts.cheri_drop_bounds_checks && !target_is_cheri_purecap(&sess.target) {
+        sess.dcx().emit_err(diagnostics::CheriDropBoundsChecksRequiresPurecap);
     }
 
     if let Some(dwarf_version) =

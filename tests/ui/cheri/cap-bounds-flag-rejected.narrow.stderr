@@ -1,0 +1,1 @@
+error: `-Z cheri-cap-bounds-checks` is only supported on CHERI purecap targets

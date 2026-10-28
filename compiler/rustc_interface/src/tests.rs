@@ -10,14 +10,15 @@ use rustc_errors::ColorConfig;
 use rustc_errors::emitter::HumanReadableErrorType;
 use rustc_lint_defs::Level;
 use rustc_session::config::{
-    AnnotateMoves, AutoDiff, BranchProtection, CFGuard, Cfg, CodegenRetagOptions, CoverageLevel,
-    CoverageOptions, DebugInfo, DumpMonoStatsFormat, ErrorOutputType, ExternEntry, ExternLocation,
-    Externs, FmtDebug, FunctionReturn, IncrementalStateAssertion, InliningThreshold, Input,
-    InstrumentCoverage, InstrumentMcount, InstrumentMcountOpts, InstrumentXRay, LinkSelfContained,
-    LinkerPluginLto, LocationDetail, LtoCli, MirIncludeSpans, NextSolverConfig, Offload, Options,
-    OutFileName, OutputType, OutputTypes, PAuthKey, PacRet, Passes, PatchableFunctionEntry,
-    Polonius, ProcMacroExecutionStrategy, Strip, SwitchWithOptPath, SymbolManglingVersion,
-    WasiExecModel, build_session_options, rustc_optgroups,
+    AnnotateMoves, AutoDiff, BranchProtection, CFGuard, Cfg, CheriCapBoundsChecks,
+    CodegenRetagOptions, CoverageLevel, CoverageOptions, DebugInfo, DumpMonoStatsFormat,
+    ErrorOutputType, ExternEntry, ExternLocation, Externs, FmtDebug, FunctionReturn,
+    IncrementalStateAssertion, InliningThreshold, Input, InstrumentCoverage, InstrumentMcount,
+    InstrumentMcountOpts, InstrumentXRay, LinkSelfContained, LinkerPluginLto, LocationDetail,
+    LtoCli, MirIncludeSpans, NextSolverConfig, Offload, Options, OutFileName, OutputType,
+    OutputTypes, PAuthKey, PacRet, Passes, PatchableFunctionEntry, Polonius,
+    ProcMacroExecutionStrategy, Strip, SwitchWithOptPath, SymbolManglingVersion, WasiExecModel,
+    build_session_options, rustc_optgroups,
 };
 use rustc_session::search_paths::SearchPath;
 use rustc_session::utils::{CanonicalizedPath, NativeLib};
@@ -800,6 +801,8 @@ fn test_unstable_options_tracking_hash() {
             gcs: true,
         })
     );
+    tracked!(cheri_cap_bounds_checks, CheriCapBoundsChecks::Elide);
+    tracked!(cheri_drop_bounds_checks, true);
     tracked!(codegen_backend, Some("abc".to_string()));
     tracked!(codegen_emit_retag, Some(CodegenRetagOptions::default()));
     tracked!(

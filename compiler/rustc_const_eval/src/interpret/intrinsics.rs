@@ -805,6 +805,12 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 self.write_pointer(new_key, &key_mplace)?;
             }
 
+            // Capability metadata is not modeled in the interpreter. On CHERI targets
+            // codegen emits the LLVM intrinsic; here the pointer is returned unchanged.
+            sym::cheri_bounds_narrow | sym::cheri_bounds_narrow_exact | sym::cheri_invalidate => {
+                self.copy_op(&args[0], dest)?;
+            }
+
             // Unsupported intrinsic: skip the return_to_block below.
             _ => return interp_ok(false),
         }

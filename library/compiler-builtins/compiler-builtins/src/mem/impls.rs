@@ -109,8 +109,121 @@ unsafe fn load_aligned_end_partial(src: *const usize, load_sz: usize) -> usize {
     out
 }
 
+/// Capability width. Integer `usize` copies are only address-width and clear tags.
+#[cfg(target_family = "cheri")]
+const CHERI_CAP_SIZE: usize = {
+    const SIZE: usize = core::mem::size_of::<*const ()>();
+    const ALIGN: usize = core::mem::align_of::<*const ()>();
+    assert!(SIZE == ALIGN && SIZE.is_power_of_two());
+    SIZE
+};
+
+/// Copy `n` bytes, using capability loads and stores for the aligned middle.
+///
+/// A capability store is required to keep the tag. `ptr::read` / `ptr::copy` lower to
+/// `memcpy` and would recurse. Volatile pointer load/store stays a capability access.
+/// Returns false when `src` and `dest` are not equally aligned mod the capability size;
+/// the caller then uses the integer path, which clears tags.
+#[cfg(target_family = "cheri")]
+unsafe fn cheri_copy_forward(dest: *mut u8, src: *const u8, n: usize) -> bool {
+    if ((dest as usize) ^ (src as usize)) & (CHERI_CAP_SIZE - 1) != 0 {
+        return false;
+    }
+    let align = (dest as usize) & (CHERI_CAP_SIZE - 1);
+    let prefix = if align == 0 { 0 } else { CHERI_CAP_SIZE - align };
+    if prefix >= n {
+        cheri_copy_bytes(dest, src, n);
+        return true;
+    }
+    cheri_copy_bytes(dest, src, prefix);
+    let rest = n - prefix;
+    let cap_bytes = rest & !(CHERI_CAP_SIZE - 1);
+    let tail = rest & (CHERI_CAP_SIZE - 1);
+    cheri_copy_caps(dest.wrapping_add(prefix), src.wrapping_add(prefix), cap_bytes);
+    cheri_copy_bytes(
+        dest.wrapping_add(prefix + cap_bytes),
+        src.wrapping_add(prefix + cap_bytes),
+        tail,
+    );
+    true
+}
+
+/// Same split as [`cheri_copy_forward`], copying high addresses first so overlapping
+/// `memmove` does not clobber a source capability before it is read.
+#[cfg(target_family = "cheri")]
+unsafe fn cheri_copy_backward(dest: *mut u8, src: *const u8, n: usize) -> bool {
+    if ((dest as usize) ^ (src as usize)) & (CHERI_CAP_SIZE - 1) != 0 {
+        return false;
+    }
+    let align = (dest as usize) & (CHERI_CAP_SIZE - 1);
+    let prefix = if align == 0 { 0 } else { CHERI_CAP_SIZE - align };
+    if prefix >= n {
+        cheri_copy_bytes_backward(dest, src, n);
+        return true;
+    }
+    let rest = n - prefix;
+    let cap_bytes = rest & !(CHERI_CAP_SIZE - 1);
+    let tail = rest & (CHERI_CAP_SIZE - 1);
+    let cap_at = prefix + cap_bytes;
+    cheri_copy_bytes_backward(dest.wrapping_add(cap_at), src.wrapping_add(cap_at), tail);
+    cheri_copy_caps_backward(dest.wrapping_add(prefix), src.wrapping_add(prefix), cap_bytes);
+    cheri_copy_bytes_backward(dest, src, prefix);
+    true
+}
+
+#[cfg(target_family = "cheri")]
+unsafe fn cheri_copy_bytes(dest: *mut u8, src: *const u8, n: usize) {
+    let mut i = 0;
+    while i < n {
+        *dest.wrapping_add(i) = *src.wrapping_add(i);
+        i += 1;
+    }
+}
+
+#[cfg(target_family = "cheri")]
+unsafe fn cheri_copy_bytes_backward(dest: *mut u8, src: *const u8, n: usize) {
+    let mut i = n;
+    while i > 0 {
+        i -= 1;
+        *dest.wrapping_add(i) = *src.wrapping_add(i);
+    }
+}
+
+#[cfg(target_family = "cheri")]
+unsafe fn cheri_copy_caps(dest: *mut u8, src: *const u8, n: usize) {
+    debug_assert!(n % CHERI_CAP_SIZE == 0);
+    let chunks = n / CHERI_CAP_SIZE;
+    let mut i = 0;
+    while i < chunks {
+        let d = dest.cast::<*const ()>().wrapping_add(i);
+        let s = src.cast::<*const ()>().wrapping_add(i);
+        let cap = core::intrinsics::volatile_load(s);
+        core::intrinsics::volatile_store(d, cap);
+        i += 1;
+    }
+}
+
+#[cfg(target_family = "cheri")]
+unsafe fn cheri_copy_caps_backward(dest: *mut u8, src: *const u8, n: usize) {
+    debug_assert!(n % CHERI_CAP_SIZE == 0);
+    let mut i = n / CHERI_CAP_SIZE;
+    while i > 0 {
+        i -= 1;
+        let d = dest.cast::<*const ()>().wrapping_add(i);
+        let s = src.cast::<*const ()>().wrapping_add(i);
+        let cap = core::intrinsics::volatile_load(s);
+        core::intrinsics::volatile_store(d, cap);
+    }
+}
+
 #[inline(always)]
 pub unsafe fn copy_forward(mut dest: *mut u8, mut src: *const u8, mut n: usize) {
+    // Capability copies keep tags. `memset` stays on integer stores so writes clear tags.
+    #[cfg(target_family = "cheri")]
+    if cheri_copy_forward(dest, src, n) {
+        return;
+    }
+
     #[inline(always)]
     unsafe fn copy_forward_bytes(mut dest: *mut u8, mut src: *const u8, n: usize) {
         let dest_end = dest.wrapping_add(n);
@@ -225,6 +338,11 @@ pub unsafe fn copy_forward(mut dest: *mut u8, mut src: *const u8, mut n: usize) 
 
 #[inline(always)]
 pub unsafe fn copy_backward(dest: *mut u8, src: *const u8, mut n: usize) {
+    #[cfg(target_family = "cheri")]
+    if cheri_copy_backward(dest, src, n) {
+        return;
+    }
+
     // The following backward copy helper functions uses the pointers past the end
     // as their inputs instead of pointers to the start!
     #[inline(always)]

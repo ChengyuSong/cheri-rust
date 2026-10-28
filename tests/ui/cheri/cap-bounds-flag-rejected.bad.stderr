@@ -1,0 +1,1 @@
+error: incorrect value `bogus` for unstable option `cheri-cap-bounds-checks` - `off` (default), `narrow`, or `elide` was expected

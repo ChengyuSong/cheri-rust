@@ -3344,11 +3344,11 @@ pub(crate) mod dep_tracking {
     };
 
     use super::{
-        AnnotateMoves, AutoDiff, BranchProtection, CFGuard, CFProtection, CodegenRetagOptions,
-        CoverageOptions, CrateType, DebugInfo, DebugInfoCompression, ErrorOutputType, FmtDebug,
-        FunctionReturn, InliningThreshold, InstrumentCoverage, InstrumentMcount,
-        InstrumentMcountOpts, InstrumentXRay, LinkerPluginLto, LocationDetail, LtoCli,
-        MirStripDebugInfo, NextSolverConfig, Offload, OptLevel, OutFileName, OutputType,
+        AnnotateMoves, AutoDiff, BranchProtection, CFGuard, CFProtection, CheriCapBoundsChecks,
+        CodegenRetagOptions, CoverageOptions, CrateType, DebugInfo, DebugInfoCompression,
+        ErrorOutputType, FmtDebug, FunctionReturn, InliningThreshold, InstrumentCoverage,
+        InstrumentMcount, InstrumentMcountOpts, InstrumentXRay, LinkerPluginLto, LocationDetail,
+        LtoCli, MirStripDebugInfo, NextSolverConfig, Offload, OptLevel, OutFileName, OutputType,
         OutputTypes, PatchableFunctionEntry, PointerAuthOption, Polonius, ResolveDocLinks,
         SourceFileHashAlgorithm, SplitDwarfKind, SwitchWithOptPath, SymbolManglingVersion,
         WasiExecModel,
@@ -3454,6 +3454,7 @@ pub(crate) mod dep_tracking {
         NextSolverConfig,
         PatchableFunctionEntry,
         Polonius,
+        CheriCapBoundsChecks,
         InliningThreshold,
         FunctionReturn,
         Align,
@@ -3629,6 +3630,20 @@ impl PatchableFunctionEntry {
     pub fn section(&self) -> Option<&str> {
         self.section.as_ref().map(|x| x.as_str())
     }
+}
+
+/// `-Z cheri-cap-bounds-checks` values.
+///
+/// `Narrow` and `Elide` are accepted so later passes can key off them. Neither changes codegen yet.
+#[derive(Clone, Copy, PartialEq, Hash, Debug, Default)]
+pub enum CheriCapBoundsChecks {
+    /// Software bounds checks only.
+    #[default]
+    Off,
+    /// Reserved: narrow the capability and keep the software check.
+    Narrow,
+    /// Reserved: narrow the capability and drop the software check. Requires narrowing.
+    Elide,
 }
 
 /// `-Zpolonius` values, enabling the borrow checker polonius analysis, and which version: legacy,

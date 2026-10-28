@@ -408,6 +408,8 @@ declare_features! (
     /// Allows defining c-variadic functions on targets where this feature has not yet
     /// undergone sufficient testing for stabilization.
     (unstable, c_variadic_experimental_arch, "1.97.0", Some(155973)),
+    /// Allows `cfg(cheri_cap_bounds_checks)`, set by `-Z cheri-cap-bounds-checks=narrow|elide`.
+    (unstable, cfg_cheri_cap_bounds_checks, "CURRENT_RUSTC_VERSION", Some(1)),
     /// Allows the use of `#[cfg(contract_checks)` to check if contract checks are enabled.
     (unstable, cfg_contract_checks, "1.86.0", Some(128044)),
     /// Allows the use of `#[cfg(overflow_checks)` to check if integer overflow behaviour.

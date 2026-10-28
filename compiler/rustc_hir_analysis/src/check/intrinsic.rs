@@ -816,6 +816,15 @@ pub(crate) fn check_intrinsic_type(
 
         // CHERI-specific intrinsics
         sym::cheri_address_get => (1, 0, vec![Ty::new_imm_ptr(tcx, param(0))], tcx.types.usize),
+        sym::cheri_bounds_narrow | sym::cheri_bounds_narrow_exact => (
+            1,
+            0,
+            vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.usize],
+            Ty::new_imm_ptr(tcx, param(0)),
+        ),
+        sym::cheri_invalidate => {
+            (1, 0, vec![Ty::new_imm_ptr(tcx, param(0))], Ty::new_imm_ptr(tcx, param(0)))
+        }
         sym::cheri_without_provenance => {
             (1, 0, vec![tcx.types.usize], Ty::new_mut_ptr(tcx, param(0)))
         }

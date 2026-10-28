@@ -1,7 +1,7 @@
 // ignore-tidy-file-linelength (target_has_atomic_primitive_alignment below overflows the linelength limit and  @ [revision]compile-flags isn't detected by tidy as something to ignore)
 
 //@ check-fail
-//@ revisions: overflow_checks_ debug_assertions_ ub_checks_ sanitize_
+//@ revisions: overflow_checks_ debug_assertions_ ub_checks_ cheri_cap_bounds_checks_ sanitize_
 //@ revisions: sanitizer_cfi_generalize_pointers_ sanitizer_cfi_normalize_integers_
 //@ revisions: proc_macro_ panic_ target_feature_ unix_ windows_ target_abi_
 //@ revisions: target_arch_ target_endian_ target_env_ target_family_ target_os_
@@ -15,6 +15,7 @@
 //@ [overflow_checks_]compile-flags: --cfg overflow_checks
 //@ [debug_assertions_]compile-flags: --cfg debug_assertions
 //@ [ub_checks_]compile-flags: --cfg ub_checks
+//@ [cheri_cap_bounds_checks_]compile-flags: --cfg cheri_cap_bounds_checks
 //@ [sanitize_]compile-flags: --cfg sanitize="cfi"
 //@ [sanitizer_cfi_generalize_pointers_]compile-flags: --cfg sanitizer_cfi_generalize_pointers
 //@ [sanitizer_cfi_normalize_integers_]compile-flags: --cfg sanitizer_cfi_normalize_integers

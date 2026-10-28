@@ -30,7 +30,7 @@ use rustc_lint_defs::builtin::EXPLICIT_BUILTIN_CFGS_IN_FLAGS;
 use rustc_span::{Symbol, sym};
 use rustc_target::spec::{PanicStrategy, RelocModel, SanitizerSet, Target};
 
-use crate::config::{CrateType, FmtDebug};
+use crate::config::{CheriCapBoundsChecks, CrateType, FmtDebug};
 use crate::{Session, diagnostics};
 
 /// The parsed `--cfg` options that define the compilation environment of the
@@ -125,6 +125,7 @@ pub(crate) fn disallow_cfgs(sess: &Session, user_cfgs: &Cfg) {
             (sym::overflow_checks, None) => disallow(cfg, "-C overflow-checks"),
             (sym::debug_assertions, None) => disallow(cfg, "-C debug-assertions"),
             (sym::ub_checks, None) => disallow(cfg, "-Z ub-checks"),
+            (sym::cheri_cap_bounds_checks, None) => disallow(cfg, "-Z cheri-cap-bounds-checks"),
             (sym::contract_checks, None) => disallow(cfg, "-Z contract-checks"),
             (sym::sanitize, None | Some(_)) => disallow(cfg, "-Z sanitizer"),
             (
@@ -330,6 +331,12 @@ pub(crate) fn default_configuration(sess: &Session) -> Cfg {
         ins_none!(sym::ub_checks);
     }
 
+    // Set for `narrow` and `elide`. `off` leaves the cfg unset. The measurement-only
+    // drop flag does not set it: that mode is not capability narrowing.
+    if !matches!(sess.opts.unstable_opts.cheri_cap_bounds_checks, CheriCapBoundsChecks::Off) {
+        ins_none!(sym::cheri_cap_bounds_checks);
+    }
+
     if sess.contract_checks() {
         ins_none!(sym::contract_checks);
     }
@@ -501,6 +508,7 @@ impl CheckCfg {
         ins!(sym::target_has_threads, no_values);
 
         ins!(sym::ub_checks, no_values);
+        ins!(sym::cheri_cap_bounds_checks, no_values);
         ins!(sym::contract_checks, no_values);
 
         ins!(sym::unix, no_values);

@@ -762,6 +762,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         mergeable_succ: bool,
     ) -> MergingSucc {
         let span = terminator.source_info.span;
+
+        // Harris et al. measurement baseline: remove the software check and do not
+        // narrow. The flag is rejected off CHERI purecap targets. `narrow`/`elide`
+        // do not take this path.
+        if bx.tcx().sess.opts.unstable_opts.cheri_drop_bounds_checks
+            && matches!(msg, AssertKind::BoundsCheck { .. })
+        {
+            return helper.funclet_br(self, bx, target, mergeable_succ, &[]);
+        }
+
         let cond = self.codegen_operand(bx, cond).immediate();
         let mut const_cond = bx.const_to_opt_u128(cond, false).map(|c| c == 1);
 
