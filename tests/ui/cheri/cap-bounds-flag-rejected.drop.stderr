@@ -1,0 +1,1 @@
+error: `-Z cheri-drop-bounds-checks` is unsound and only supported on CHERI purecap targets

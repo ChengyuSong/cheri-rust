@@ -10,7 +10,8 @@ use rustc_errors::ColorConfig;
 use rustc_errors::emitter::HumanReadableErrorType;
 use rustc_lint_defs::Level;
 use rustc_session::config::{
-    AnnotateMoves, AutoDiff, BranchProtection, CFGuard, Cfg, CodegenRetagOptions, CoverageLevel,
+    AnnotateMoves, AutoDiff, BranchProtection, CFGuard, Cfg, CheriCapBoundsChecks,
+    CodegenRetagOptions, CoverageLevel,
     CoverageOptions, DebugInfo, DumpMonoStatsFormat, ErrorOutputType, ExternEntry, ExternLocation,
     Externs, FmtDebug, FunctionReturn, IncrementalStateAssertion, InliningThreshold, Input,
     InstrumentCoverage, InstrumentMcount, InstrumentMcountOpts, InstrumentXRay, LinkSelfContained,
@@ -800,6 +801,8 @@ fn test_unstable_options_tracking_hash() {
             gcs: true,
         })
     );
+    tracked!(cheri_cap_bounds_checks, CheriCapBoundsChecks::Elide);
+    tracked!(cheri_drop_bounds_checks, true);
     tracked!(codegen_backend, Some("abc".to_string()));
     tracked!(codegen_emit_retag, Some(CodegenRetagOptions::default()));
     tracked!(

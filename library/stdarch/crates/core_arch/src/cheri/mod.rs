@@ -15,12 +15,6 @@ mod intrinsics {
        #[link_name = "llvm.cheri.cap.base.get.32"]
         pub fn __builtin_cheri_base_get(ptr: *const ()) -> usize;
 
-        #[link_name = "llvm.cheri.cap.bounds.set.32"]
-        pub fn __builtin_cheri_bounds_set(ptr: *const (), bounds: usize) -> *const ();
-
-        #[link_name = "llvm.cheri.cap.bounds.set.exact.32"]
-        pub fn __builtin_cheri_bounds_set_exact(ptr: *const (), bounds: usize) -> *const ();
-
         #[link_name = "llvm.cheri.cap.length.get.32"]
         pub fn __builtin_cheri_length_get(ptr: *const ()) -> usize;
 
@@ -55,12 +49,6 @@ mod intrinsics {
 
        #[link_name = "llvm.cheri.cap.base.get.64"]
         pub fn __builtin_cheri_base_get(ptr: *const ()) -> usize;
-
-        #[link_name = "llvm.cheri.cap.bounds.set.64"]
-        pub fn __builtin_cheri_bounds_set(ptr: *const (), bounds: usize) -> *const ();
-
-        #[link_name = "llvm.cheri.cap.bounds.set.exact.64"]
-        pub fn __builtin_cheri_bounds_set_exact(ptr: *const (), bounds: usize) -> *const ();
 
         #[link_name = "llvm.cheri.cap.length.get.64"]
         pub fn __builtin_cheri_length_get(ptr: *const ()) -> usize;
@@ -129,23 +117,27 @@ pub fn base_get<T: PointeeSized>(ptr: *const T) -> usize {
 }
 
 /// Set the bounds of the capability.
+///
+/// On CHERI this is `CSetBounds` (rounds up). Elsewhere, in CTFE, and in Miri it returns `ptr`.
 #[unstable(feature = "stdarch_cheri", issue = "1")]
 #[inline(always)]
-pub unsafe fn bounds_set<T: PointeeSized>(ptr: *const T, bounds: usize) -> *const T {
-    let (thin_ptr, metadata) = ptr.to_raw_parts();
-    let thin_ptr = unsafe { __builtin_cheri_bounds_set(core::mem::transmute(thin_ptr), bounds) };
-    core::ptr::from_raw_parts(thin_ptr, metadata)
+pub const unsafe fn bounds_set<T: PointeeSized>(ptr: *const T, bounds: usize) -> *const T {
+    unsafe { core::intrinsics::cheri_bounds_narrow(ptr, bounds) }
 }
 
 /// Set the bounds of the capability without any rounding.
+///
+/// On CHERI this is `CSetBoundsExact`. If the bounds are not exactly representable,
+/// the result is an untagged capability: on QEMU-CHERI and CHERI-Toooba (rv64 ISAv9)
+/// the instruction clears the tag and does not trap. The first access is then a tag
+/// violation, not a length violation. [`tag_get`] (`cgettag`) on the result is a
+/// valid exactness test.
+///
+/// Elsewhere, in CTFE, and in Miri this returns `ptr`.
 #[unstable(feature = "stdarch_cheri", issue = "1")]
 #[inline(always)]
-pub unsafe fn bounds_set_exact<T: PointeeSized>(ptr: *const T, bounds: usize) -> *const T {
-    let (thin_ptr, metadata) = ptr.to_raw_parts();
-    let thin_ptr =
-        unsafe { __builtin_cheri_bounds_set_exact(core::mem::transmute(thin_ptr), bounds) };
-
-    core::ptr::from_raw_parts(thin_ptr, metadata)
+pub const unsafe fn bounds_set_exact<T: PointeeSized>(ptr: *const T, bounds: usize) -> *const T {
+    unsafe { core::intrinsics::cheri_bounds_narrow_exact(ptr, bounds) }
 }
 
 /// Compare two capabilities for exact equality.
@@ -197,6 +189,11 @@ pub fn permissions_get<T: PointeeSized>(ptr: *const T) -> usize {
 }
 
 /// Get the representable alignment mask for the given length.
+///
+/// On RV64, LLVM's `getAlignmentMask` (this intrinsic) is one bit too weak for
+/// lengths just below each power of two from 8 KiB up. Length `0x1ff9` is reported
+/// as 8-byte alignment; QEMU-CHERI and CHERI-Toooba require 16. Do not treat a
+/// length as exactly representable because this mask says so.
 #[unstable(feature = "stdarch_cheri", issue = "1")]
 #[inline]
 #[rustc_nounwind]
@@ -282,19 +279,13 @@ pub fn subset_test<A: PointeeSized, B: PointeeSized>(left: *const A, right: *con
 }
 
 /// Clear the tag of the capability.
+///
+/// On CHERI this is `CClearTag`. Elsewhere, in CTFE, and in Miri it returns `ptr`.
 #[unstable(feature = "stdarch_cheri", issue = "1")]
 #[inline]
 #[rustc_nounwind]
-pub unsafe fn tag_clear<T: PointeeSized>(ptr: *const T) -> *const T {
-    unsafe extern "C" {
-        #[link_name = "llvm.cheri.cap.tag.clear"]
-        pub fn __builtin_cheri_tag_clear(ptr: *const ()) -> *const ();
-    }
-
-    let (thin_ptr, metadata) = ptr.to_raw_parts();
-
-    let thin_ptr = unsafe { __builtin_cheri_tag_clear(core::mem::transmute(thin_ptr)) };
-    core::ptr::from_raw_parts(thin_ptr, metadata)
+pub const unsafe fn tag_clear<T: PointeeSized>(ptr: *const T) -> *const T {
+    unsafe { core::intrinsics::cheri_invalidate(ptr) }
 }
 
 /// Get the tag of the capability.

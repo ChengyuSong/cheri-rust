@@ -36,7 +36,8 @@ use rustc_target::spec::{
 use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
 use crate::config::{
-    self, BranchProtection, Cfg, CheckCfg, CoverageLevel, CoverageOptions, DebugInfo,
+    self, BranchProtection, Cfg, CheckCfg, CheriCapBoundsChecks, CoverageLevel, CoverageOptions,
+    DebugInfo,
     ErrorOutputType, FunctionReturn, Input, InstrumentCoverage, InstrumentMcount, LtoCli,
     NATIVE_CPU, OutFileName, OutputType, PAuthKey, PointerAuthOption, SwitchWithOptPath,
 };
@@ -1534,6 +1535,11 @@ pub fn generate_proc_macro_decls_symbol(stable_crate_id: StableCrateId) -> Strin
 /// can do so here.
 // JUSTIFICATION: needs to access args to validate them
 #[allow(rustc::bad_opt_access)]
+/// Pure-capability CHERI: RV64 purecap and CHERIoT. Hybrid ABIs are not included.
+fn target_is_cheri_purecap(target: &Target) -> bool {
+    target.is_like_cheri && matches!(target.cfg_abi, CfgAbi::Purecap | CfgAbi::CHERIoT)
+}
+
 fn validate_commandline_args_with_session_available(sess: &Session) {
     // Since we don't know if code in an rlib will be linked to statically or
     // dynamically downstream, rustc generates `__imp_` symbols that help linkers
@@ -1729,6 +1735,15 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
 
     if sess.opts.unstable_opts.branch_protection.is_some() && sess.target.arch != Arch::AArch64 {
         sess.dcx().emit_err(diagnostics::BranchProtectionRequiresAArch64);
+    }
+
+    if sess.opts.unstable_opts.cheri_cap_bounds_checks != CheriCapBoundsChecks::Off
+        && !target_is_cheri_purecap(&sess.target)
+    {
+        sess.dcx().emit_err(diagnostics::CheriCapBoundsChecksRequiresPurecap);
+    }
+    if sess.opts.unstable_opts.cheri_drop_bounds_checks && !target_is_cheri_purecap(&sess.target) {
+        sess.dcx().emit_err(diagnostics::CheriDropBoundsChecksRequiresPurecap);
     }
 
     if let Some(dwarf_version) =

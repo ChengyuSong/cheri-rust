@@ -915,6 +915,7 @@ mod desc {
     pub(crate) const parse_deny_partial_mitigations: &str =
         super::mitigation_coverage::DeniedPartialMitigationKind::KINDS;
     pub(crate) const parse_rust_version: &str = "a rust version (`xx.yy.zz`)";
+    pub(crate) const parse_cheri_cap_bounds_checks: &str = "`off` (default), `narrow`, or `elide`";
 }
 
 pub mod parse {
@@ -974,6 +975,19 @@ pub mod parse {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn parse_cheri_cap_bounds_checks(
+        slot: &mut CheriCapBoundsChecks,
+        v: Option<&str>,
+    ) -> bool {
+        *slot = match v {
+            Some("off") | Some("no") | Some("false") => CheriCapBoundsChecks::Off,
+            Some("narrow") => CheriCapBoundsChecks::Narrow,
+            Some("elide") => CheriCapBoundsChecks::Elide,
+            _ => return false,
+        };
+        true
     }
 
     /// Parses whether polonius is enabled, and if so, which version.
@@ -2419,6 +2433,17 @@ options! {
         "show all expected values in check-cfg diagnostics (default: no)"),
     checksum_hash_algorithm: Option<SourceFileHashAlgorithm> = (None, parse_cargo_src_file_hash, [TRACKED],
         "hash algorithm of source files used to check freshness in cargo (`blake3` or `sha256`)"),
+    cheri_cap_bounds_checks: CheriCapBoundsChecks = (
+        CheriCapBoundsChecks::Off,
+        parse_cheri_cap_bounds_checks,
+        [TRACKED],
+        "on CHERI purecap targets, narrow capabilities where Rust checks bounds \
+         (`off` (default), `narrow`, or `elide`). \
+         `narrow` and `elide` are accepted but do not change codegen yet"
+    ),
+    cheri_drop_bounds_checks: bool = (false, parse_bool, [TRACKED],
+        "measurement-only: drop MIR `Assert(BoundsCheck)` with no capability narrowing \
+         (unsound; CHERI purecap targets only) (default: no)"),
     codegen_backend: Option<String> = (None, parse_opt_string, [TRACKED],
         "the backend to use"),
     codegen_emit_retag: Option<CodegenRetagOptions> = (None, parse_codegen_retag_options, [TRACKED],

@@ -3258,6 +3258,54 @@ pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: us
 #[rustc_intrinsic]
 pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize);
 
+/// Narrow a CHERI capability to `bytes` from its current address (`CSetBounds`, rounding up).
+///
+/// Metadata on a wide pointer is preserved. The pointer is returned unchanged in CTFE, in Miri,
+/// and on targets that are not CHERI. On CHERI targets, codegen lowers this to
+/// `llvm.cheri.cap.bounds.set`.
+///
+/// The fallback body is that same identity, for backends without a CHERI lowering.
+#[rustc_nounwind]
+#[unstable(feature = "core_intrinsics", issue = "none")]
+#[rustc_intrinsic]
+pub const unsafe fn cheri_bounds_narrow<T: ?Sized>(ptr: *const T, _bytes: usize) -> *const T {
+    ptr
+}
+
+/// Narrow a CHERI capability to exactly `bytes` (`CSetBoundsExact`).
+///
+/// On CHERI targets, codegen lowers this to `llvm.cheri.cap.bounds.set.exact`.
+/// Unrepresentable bounds do not trap: the result is an untagged capability.
+/// On QEMU-CHERI and CHERI-Toooba (rv64 ISAv9), `csetboundsexact` clears the tag,
+/// and the first access then raises a tag violation rather than a length violation.
+/// `cgettag` on the result (`core::arch::cheri::tag_get`) is a valid exactness test.
+///
+/// Metadata on a wide pointer is preserved. The pointer is returned unchanged in
+/// CTFE, in Miri, and on targets that are not CHERI.
+///
+/// LLVM's RV64 `getAlignmentMask` is one bit too weak for lengths just below each
+/// power of two from 8 KiB up (length `0x1ff9`: LLVM reports 8-byte alignment,
+/// hardware requires 16). Do not use it to decide that a length is exactly
+/// representable.
+#[rustc_nounwind]
+#[unstable(feature = "core_intrinsics", issue = "none")]
+#[rustc_intrinsic]
+pub const unsafe fn cheri_bounds_narrow_exact<T: ?Sized>(ptr: *const T, _bytes: usize) -> *const T {
+    ptr
+}
+
+/// Clear the tag of a CHERI capability (`CClearTag`).
+///
+/// The address bits are kept. The pointer is returned unchanged in CTFE, in Miri, and on
+/// targets that are not CHERI. On CHERI targets, codegen lowers this to
+/// `llvm.cheri.cap.tag.clear`.
+#[rustc_nounwind]
+#[unstable(feature = "core_intrinsics", issue = "none")]
+#[rustc_intrinsic]
+pub const unsafe fn cheri_invalidate<T: ?Sized>(ptr: *const T) -> *const T {
+    ptr
+}
+
 /// This is an accidentally-stable alias to [`ptr::write_bytes`]; use that instead.
 // Note (intentionally not in the doc comment): `ptr::write_bytes` adds some extra
 // debug assertions; if you are writing compiler tests or code inside the standard library
