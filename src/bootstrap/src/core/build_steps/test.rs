@@ -4316,7 +4316,7 @@ impl CommandLineStep for TestHelpers {
             }
             cfg.cargo_metadata(false)
                 .out_dir(&dst)
-                .target(&target.triple)
+                .target(crate::utils::cc_detect::cc_rs_triple(&target))
                 .host(&builder.config.host_target.triple)
                 .opt_level(0)
                 .warnings(false)

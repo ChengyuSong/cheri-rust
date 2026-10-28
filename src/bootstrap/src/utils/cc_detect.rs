@@ -29,6 +29,19 @@ use crate::core::config::flags::Subcommand;
 use crate::core::config::{CompressDebuginfo, TargetSelection};
 use crate::core::session::{CLang, Session};
 use crate::utils::exec::{BootstrapCommand, command};
+/// The triple to hand to `cc-rs` for `target`.
+///
+/// `cc-rs` refuses target names it cannot parse, such as the CHERI purecap ABI in
+/// `riscv64cheri-unknown-none-purecap` ("unknown environment/ABI `purecap`"). Give it the
+/// closest triple it knows. The real C compiler and its flags for such a target are expected
+/// to come from `target.<triple>.cc` / `ar` in `bootstrap.toml`.
+pub(crate) fn cc_rs_triple(target: &TargetSelection) -> &str {
+    match &*target.triple {
+        "riscv64cheri-unknown-none-purecap" => "riscv64imac-unknown-none-elf",
+        triple => triple,
+    }
+}
+
 /// Creates and configures a new [`cc::Build`] instance for the given target.
 fn new_cc_build(sess: &Session, target: TargetSelection) -> cc::Build {
     let mut cfg = cc::Build::new();
@@ -38,7 +51,7 @@ fn new_cc_build(sess: &Session, target: TargetSelection) -> cc::Build {
         .debug(false)
         // We have to configure out_dir, otherwise flag_if_supported will not work
         .out_dir(sess.tempdir().join("cc-rs-out-dir"))
-        .target(&target.triple)
+        .target(cc_rs_triple(&target))
         .host(&sess.host_target.triple);
 
     match sess.config.compress_debuginfo(target) {
