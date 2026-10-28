@@ -8,6 +8,8 @@ pub use core::alloc::*;
 use core::mem::Alignment;
 use core::ptr::{self, NonNull};
 use core::{cmp, hint};
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+use core::fmt;
 
 unsafe extern "Rust" {
     // These are the magic symbols to call the global allocator. rustc generates
@@ -147,7 +149,18 @@ pub unsafe fn alloc(layout: Layout) -> *mut u8 {
         // stable code until it is actually stabilized.
         __rust_no_alloc_shim_is_unstable_v2();
 
-        __rust_alloc(layout.size(), layout.alignment())
+        #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+        let p = {
+            let (len, align) = cheri_heap::padded(layout.size(), layout.alignment());
+            if len < layout.size() {
+                ptr::null_mut()
+            } else {
+                cheri_heap::bound(__rust_alloc(len, align), len)
+            }
+        };
+        #[cfg(not(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds))))]
+        let p = __rust_alloc(layout.size(), layout.alignment());
+        p
     }
 }
 
@@ -193,8 +206,13 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
 #[inline]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn dealloc_nonnull(ptr: NonNull<u8>, layout: Layout) {
+    // On CHERI purecap, `alloc` asked the global allocator for the padded layout.
+    #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+    let (size, align) = cheri_heap::padded(layout.size(), layout.alignment());
+    #[cfg(not(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds))))]
+    let (size, align) = (layout.size(), layout.alignment());
     // SAFETY: Upheld by caller.
-    unsafe { __rust_dealloc(ptr, layout.size(), layout.alignment()) }
+    unsafe { __rust_dealloc(ptr, size, align) }
 }
 
 /// Reallocates memory with the global allocator.
@@ -249,7 +267,13 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn realloc_nonnull(ptr: NonNull<u8>, layout: Layout, new_size: usize) -> *mut u8 {
     // SAFETY: Upheld by caller.
-    unsafe { __rust_realloc(ptr, layout.size(), layout.alignment(), new_size) }
+    // SAFETY: Upheld by caller.
+    #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+    let p = unsafe { cheri_heap::realloc(ptr, layout, new_size) };
+    // SAFETY: Upheld by caller.
+    #[cfg(not(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds))))]
+    let p = unsafe { __rust_realloc(ptr, layout.size(), layout.alignment(), new_size) };
+    p
 }
 
 /// Allocates zero-initialized memory with the global allocator.
@@ -312,7 +336,243 @@ pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
         // stable code until it is actually stabilized.
         __rust_no_alloc_shim_is_unstable_v2();
 
-        __rust_alloc_zeroed(layout.size(), layout.alignment())
+        #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+        let p = {
+            let (len, align) = cheri_heap::padded(layout.size(), layout.alignment());
+            if len < layout.size() {
+                ptr::null_mut()
+            } else {
+                cheri_heap::bound(__rust_alloc_zeroed(len, align), len)
+            }
+        };
+        #[cfg(not(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds))))]
+        let p = __rust_alloc_zeroed(layout.size(), layout.alignment());
+        p
+    }
+}
+
+/// Allocation-level capability bounds for the global allocator on CHERI purecap targets.
+///
+/// Every block handed out by [`alloc`], [`alloc_zeroed`] and [`realloc`] (and so by
+/// `Box`, `Vec`, `String`, `Rc` and `Arc` through [`Global`]) is a capability whose bounds
+/// are exactly the block. The request is padded and aligned so that the bounds are
+/// representable: the length is rounded up with `CRRL`, and the alignment is raised to
+/// what `CRAM` requires for the rounded length. The global allocator sees the padded
+/// layout in `alloc`, `realloc` and `dealloc`, so the layouts it receives stay consistent.
+///
+/// The capability given back to `GlobalAlloc::dealloc` and `GlobalAlloc::realloc` is the
+/// bounded one. An allocator that needs more than the block itself at that point (a
+/// header in front of the block, or a free list whose nodes are later merged) must
+/// re-derive a wider capability from a root it owns; [`CheriBoundedAlloc::with_root`]
+/// does that. Growing a block never uses `GlobalAlloc::realloc`, because a block grown in
+/// place would come back with the old bounds; it allocates, copies and frees instead.
+///
+/// Build the standard library with `--cfg cheri_no_heap_bounds` to turn this off.
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+mod cheri_heap {
+    use core::alloc::Layout;
+    use core::arch::cheri;
+    use core::mem::Alignment;
+    use core::ptr::{self, NonNull};
+
+    /// The padded `(length, alignment)` for a block of `size` bytes aligned to `align`.
+    ///
+    /// The length is 0 or less than `size` only if `size` is too large to be represented.
+    #[inline]
+    pub(super) fn padded(size: usize, align: Alignment) -> (usize, Alignment) {
+        let len = cheri::round_representable_length(size);
+        // CRAM of the rounded length is the alignment the bounds of `size` bytes need.
+        // Using the rounded length also sidesteps LLVM folding CRAM of a constant `size`
+        // with a mask that is one bit too weak just below powers of two.
+        let req = (!cheri::representable_alignment_mask(len)).wrapping_add(1);
+        match Alignment::new(req) {
+            Some(r) if r > align => (len, r),
+            _ => (len, align),
+        }
+    }
+
+    /// Bound `p` to exactly `len` bytes. A null `p` stays null.
+    ///
+    /// `p` is aligned as [`padded`] asked, so the bounds are exact. If the allocator broke
+    /// that contract, `CSetBoundsExact` clears the tag and the first access faults.
+    #[inline]
+    pub(super) unsafe fn bound(p: *mut u8, len: usize) -> *mut u8 {
+        if p.is_null() {
+            return p;
+        }
+        // SAFETY: narrowing a capability is always allowed.
+        unsafe { cheri::bounds_set_exact(p, len) as *mut u8 }
+    }
+
+    #[inline]
+    pub(super) unsafe fn realloc(ptr: NonNull<u8>, layout: Layout, new_size: usize) -> *mut u8 {
+        let (old_len, old_align) = padded(layout.size(), layout.alignment());
+        let (new_len, new_align) = padded(new_size, layout.alignment());
+        if new_len < new_size {
+            return ptr::null_mut();
+        }
+        if new_len == old_len && new_align == old_align {
+            // Same padded block: the bounds are already exactly `new_len`.
+            return ptr.as_ptr();
+        }
+        if new_len <= old_len && new_align <= old_align {
+            // Shrink: the allocator may keep the block in place.
+            // SAFETY: Upheld by caller; the old layout is the padded one `alloc` used.
+            unsafe {
+                return bound(super::__rust_realloc(ptr, old_len, old_align, new_len), new_len);
+            }
+        }
+        // Grow: allocate, copy and free, so the new block gets fresh bounds.
+        // SAFETY: Upheld by caller.
+        unsafe {
+            let new_layout = Layout::from_size_alignment_unchecked(new_size, layout.alignment());
+            let new = super::alloc(new_layout);
+            if !new.is_null() {
+                ptr::copy_nonoverlapping(ptr.as_ptr(), new, cmp_min(layout.size(), new_size));
+                super::dealloc_nonnull(ptr, layout);
+            }
+            new
+        }
+    }
+
+    #[inline]
+    fn cmp_min(a: usize, b: usize) -> usize {
+        if a < b { a } else { b }
+    }
+}
+
+/// A [`GlobalAlloc`] adapter for CHERI purecap targets that bounds every block to an
+/// exactly representable allocation and, given a root, re-derives the allocator's own
+/// capability before handing a block back.
+///
+/// ```ignore (cheri-purecap-only)
+/// static mut HEAP: [u8; 1 << 20] = [0; 1 << 20];
+/// #[global_allocator]
+/// static A: CheriBoundedAlloc<MyAlloc> =
+///     unsafe { CheriBoundedAlloc::with_root(MyAlloc::new(), (&raw mut HEAP).cast()) };
+/// ```
+///
+/// `new` passes the bounded capability back to the inner allocator in `dealloc` and
+/// `realloc`; use it for allocators that only touch the block itself (for example, a bump
+/// allocator). `with_root` re-derives a capability from `root` at the block's address,
+/// so the inner allocator gets back the bounds it handed out (for example, for a free-list
+/// allocator that writes headers or merges neighbouring blocks).
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+#[unstable(feature = "cheri_bounded_alloc", issue = "none")]
+pub struct CheriBoundedAlloc<A> {
+    inner: A,
+    root: *mut u8,
+}
+
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+#[unstable(feature = "cheri_bounded_alloc", issue = "none")]
+impl<A: fmt::Debug> fmt::Debug for CheriBoundedAlloc<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheriBoundedAlloc").field("inner", &self.inner).field("root", &self.root).finish()
+    }
+}
+
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+#[unstable(feature = "cheri_bounded_alloc", issue = "none")]
+// SAFETY: `root` is only used to re-derive pointers for `inner`, which is itself `Sync`.
+unsafe impl<A: Sync> Sync for CheriBoundedAlloc<A> {}
+
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+impl<A> CheriBoundedAlloc<A> {
+    /// Wrap `inner`. Bounded capabilities are passed back to it in `dealloc`/`realloc`.
+    #[unstable(feature = "cheri_bounded_alloc", issue = "none")]
+    pub const fn new(inner: A) -> Self {
+        CheriBoundedAlloc { inner, root: ptr::null_mut() }
+    }
+
+    /// Wrap `inner`, re-deriving capabilities from `root` before passing them back.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be a capability whose bounds and permissions cover every block that
+    /// `inner` hands out.
+    #[unstable(feature = "cheri_bounded_alloc", issue = "none")]
+    pub const unsafe fn with_root(inner: A, root: *mut u8) -> Self {
+        CheriBoundedAlloc { inner, root }
+    }
+
+    #[inline]
+    fn rederive(&self, p: *mut u8) -> *mut u8 {
+        if self.root.is_null() {
+            p
+        } else {
+            // SAFETY: `root` covers the block (see `with_root`).
+            unsafe {
+                core::arch::cheri::address_set(self.root, core::arch::cheri::address_get(p))
+                    as *mut u8
+            }
+        }
+    }
+}
+
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+#[unstable(feature = "cheri_bounded_alloc", issue = "none")]
+unsafe impl<A: GlobalAlloc> GlobalAlloc for CheriBoundedAlloc<A> {
+    #[inline]
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let (len, align) = cheri_heap::padded(layout.size(), layout.alignment());
+        if len < layout.size() {
+            return ptr::null_mut();
+        }
+        // SAFETY: `len` is non-zero and `align` a power of two not below `layout.align()`.
+        unsafe {
+            let l = Layout::from_size_alignment_unchecked(len, align);
+            cheri_heap::bound(self.inner.alloc(l), len)
+        }
+    }
+
+    #[inline]
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let (len, align) = cheri_heap::padded(layout.size(), layout.alignment());
+        if len < layout.size() {
+            return ptr::null_mut();
+        }
+        // SAFETY: as in `alloc`.
+        unsafe {
+            let l = Layout::from_size_alignment_unchecked(len, align);
+            cheri_heap::bound(self.inner.alloc_zeroed(l), len)
+        }
+    }
+
+    #[inline]
+    unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
+        let (len, align) = cheri_heap::padded(layout.size(), layout.alignment());
+        // SAFETY: `alloc` asked `inner` for exactly this layout.
+        unsafe {
+            self.inner.dealloc(self.rederive(p), Layout::from_size_alignment_unchecked(len, align))
+        }
+    }
+
+    #[inline]
+    unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let (old_len, old_align) = cheri_heap::padded(layout.size(), layout.alignment());
+        let (new_len, new_align) = cheri_heap::padded(new_size, layout.alignment());
+        if new_len < new_size {
+            return ptr::null_mut();
+        }
+        // In place (or by the inner allocator) only if the inner block's alignment still
+        // suffices and, for growth, a root can restore the inner allocator's capability.
+        if new_align <= old_align && (new_len <= old_len || !self.root.is_null()) {
+            // SAFETY: Upheld by caller; the old layout is the padded one `alloc` used.
+            unsafe {
+                let l = Layout::from_size_alignment_unchecked(old_len, old_align);
+                return cheri_heap::bound(self.inner.realloc(self.rederive(p), l, new_len), new_len);
+            }
+        }
+        // SAFETY: Upheld by caller.
+        unsafe {
+            let new = self.alloc(Layout::from_size_alignment_unchecked(new_size, layout.alignment()));
+            if !new.is_null() {
+                ptr::copy_nonoverlapping(p, new, cmp::min(layout.size(), new_size));
+                self.dealloc(p, layout);
+            }
+            new
+        }
     }
 }
 
