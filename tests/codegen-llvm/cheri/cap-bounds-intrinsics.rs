@@ -1,5 +1,6 @@
 //@ compile-flags: -Copt-level=0
 //@ only-riscv64cheri-unknown-none-purecap
+// FileCheck sees functions in source order because compiletest passes `-Zcodegen-source-order`.
 
 #![crate_type = "lib"]
 #![no_std]

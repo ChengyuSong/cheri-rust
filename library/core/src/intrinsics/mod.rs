@@ -3268,7 +3268,7 @@ pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize);
 #[rustc_nounwind]
 #[unstable(feature = "core_intrinsics", issue = "none")]
 #[rustc_intrinsic]
-pub const unsafe fn cheri_bounds_narrow<T: ?Sized>(ptr: *const T, _bytes: usize) -> *const T {
+pub const unsafe fn cheri_bounds_narrow<T: PointeeSized>(ptr: *const T, _bytes: usize) -> *const T {
     ptr
 }
 
@@ -3290,7 +3290,10 @@ pub const unsafe fn cheri_bounds_narrow<T: ?Sized>(ptr: *const T, _bytes: usize)
 #[rustc_nounwind]
 #[unstable(feature = "core_intrinsics", issue = "none")]
 #[rustc_intrinsic]
-pub const unsafe fn cheri_bounds_narrow_exact<T: ?Sized>(ptr: *const T, _bytes: usize) -> *const T {
+pub const unsafe fn cheri_bounds_narrow_exact<T: PointeeSized>(
+    ptr: *const T,
+    _bytes: usize,
+) -> *const T {
     ptr
 }
 
@@ -3302,7 +3305,7 @@ pub const unsafe fn cheri_bounds_narrow_exact<T: ?Sized>(ptr: *const T, _bytes: 
 #[rustc_nounwind]
 #[unstable(feature = "core_intrinsics", issue = "none")]
 #[rustc_intrinsic]
-pub const unsafe fn cheri_invalidate<T: ?Sized>(ptr: *const T) -> *const T {
+pub const unsafe fn cheri_invalidate<T: PointeeSized>(ptr: *const T) -> *const T {
     ptr
 }
 

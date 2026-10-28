@@ -37,9 +37,8 @@ use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
 use crate::config::{
     self, BranchProtection, Cfg, CheckCfg, CheriCapBoundsChecks, CoverageLevel, CoverageOptions,
-    DebugInfo,
-    ErrorOutputType, FunctionReturn, Input, InstrumentCoverage, InstrumentMcount, LtoCli,
-    NATIVE_CPU, OutFileName, OutputType, PAuthKey, PointerAuthOption, SwitchWithOptPath,
+    DebugInfo, ErrorOutputType, FunctionReturn, Input, InstrumentCoverage, InstrumentMcount,
+    LtoCli, NATIVE_CPU, OutFileName, OutputType, PAuthKey, PointerAuthOption, SwitchWithOptPath,
 };
 use crate::filesearch::FileSearch;
 use crate::lint::LintId;
@@ -1529,17 +1528,17 @@ pub fn generate_proc_macro_decls_symbol(stable_crate_id: StableCrateId) -> Strin
     format!("__rustc_proc_macro_decls_{:08x}__", stable_crate_id.as_u64())
 }
 
+/// Pure-capability CHERI: RV64 purecap and CHERIoT. Hybrid ABIs are not included.
+fn target_is_cheri_purecap(target: &Target) -> bool {
+    target.is_like_cheri && matches!(target.cfg_abi, CfgAbi::Purecap | CfgAbi::CHERIoT)
+}
+
 /// Validate command line arguments with a `Session`.
 ///
 /// If it is useful to have a Session available already for validating a commandline argument, you
 /// can do so here.
 // JUSTIFICATION: needs to access args to validate them
 #[allow(rustc::bad_opt_access)]
-/// Pure-capability CHERI: RV64 purecap and CHERIoT. Hybrid ABIs are not included.
-fn target_is_cheri_purecap(target: &Target) -> bool {
-    target.is_like_cheri && matches!(target.cfg_abi, CfgAbi::Purecap | CfgAbi::CHERIoT)
-}
-
 fn validate_commandline_args_with_session_available(sess: &Session) {
     // Since we don't know if code in an rlib will be linked to statically or
     // dynamically downstream, rustc generates `__imp_` symbols that help linkers

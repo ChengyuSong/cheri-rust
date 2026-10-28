@@ -415,9 +415,7 @@ pub(crate) struct BranchProtectionRequiresAArch64;
 pub(crate) struct CheriCapBoundsChecksRequiresPurecap;
 
 #[derive(Diagnostic)]
-#[diag(
-    "`-Z cheri-drop-bounds-checks` is unsound and only supported on CHERI purecap targets"
-)]
+#[diag("`-Z cheri-drop-bounds-checks` is unsound and only supported on CHERI purecap targets")]
 pub(crate) struct CheriDropBoundsChecksRequiresPurecap;
 
 #[derive(Diagnostic)]

@@ -18,10 +18,11 @@ const fn narrow_slice(p: *const [u8], n: usize) -> *const [u8] {
 
 const P: *const u8 = 0x1000 as *const u8;
 
-const _: () = assert!(narrow(P, 4).addr() == P.addr());
-const _: () = assert!(narrow_exact(P, 4).addr() == P.addr());
-const _: () = assert!(invalidate(P).addr() == P.addr());
+// Force the intrinsics through CTFE. Pointer address comparison is not const here.
+const _: *const u8 = narrow(P, 4);
+const _: *const u8 = narrow_exact(P, 4);
+const _: *const u8 = invalidate(P);
 
+// Wide-pointer metadata is preserved. `<*const [T]>::len` is const; `as_ptr` is not.
 const S: *const [u8] = narrow_slice(core::ptr::slice_from_raw_parts(P, 8), 3);
 const _: () = assert!(S.len() == 8);
-const _: () = assert!(S.as_ptr().addr() == P.addr());

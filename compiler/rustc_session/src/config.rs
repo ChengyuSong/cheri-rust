@@ -3345,11 +3345,10 @@ pub(crate) mod dep_tracking {
 
     use super::{
         AnnotateMoves, AutoDiff, BranchProtection, CFGuard, CFProtection, CheriCapBoundsChecks,
-        CodegenRetagOptions,
-        CoverageOptions, CrateType, DebugInfo, DebugInfoCompression, ErrorOutputType, FmtDebug,
-        FunctionReturn, InliningThreshold, InstrumentCoverage, InstrumentMcount,
-        InstrumentMcountOpts, InstrumentXRay, LinkerPluginLto, LocationDetail, LtoCli,
-        MirStripDebugInfo, NextSolverConfig, Offload, OptLevel, OutFileName, OutputType,
+        CodegenRetagOptions, CoverageOptions, CrateType, DebugInfo, DebugInfoCompression,
+        ErrorOutputType, FmtDebug, FunctionReturn, InliningThreshold, InstrumentCoverage,
+        InstrumentMcount, InstrumentMcountOpts, InstrumentXRay, LinkerPluginLto, LocationDetail,
+        LtoCli, MirStripDebugInfo, NextSolverConfig, Offload, OptLevel, OutFileName, OutputType,
         OutputTypes, PatchableFunctionEntry, PointerAuthOption, Polonius, ResolveDocLinks,
         SourceFileHashAlgorithm, SplitDwarfKind, SwitchWithOptPath, SymbolManglingVersion,
         WasiExecModel,
