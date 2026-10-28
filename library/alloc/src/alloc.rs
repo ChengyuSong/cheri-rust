@@ -269,7 +269,7 @@ unsafe fn realloc_nonnull(ptr: NonNull<u8>, layout: Layout, new_size: usize) -> 
     // SAFETY: Upheld by caller.
     // SAFETY: Upheld by caller.
     #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
-    let p = unsafe { cheri_heap::realloc(ptr, layout, new_size) };
+    let p = unsafe { cheri_heap::resize(&cheri_heap::Global, ptr.as_ptr(), layout, new_size) };
     // SAFETY: Upheld by caller.
     #[cfg(not(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds))))]
     let p = unsafe { __rust_realloc(ptr, layout.size(), layout.alignment(), new_size) };
@@ -364,8 +364,10 @@ pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
 /// bounded one. An allocator that needs more than the block itself at that point (a
 /// header in front of the block, or a free list whose nodes are later merged) must
 /// re-derive a wider capability from a root it owns; [`CheriBoundedAlloc::with_root`]
-/// does that. Growing a block never uses `GlobalAlloc::realloc`, because a block grown in
-/// place would come back with the old bounds; it allocates, copies and frees instead.
+/// does that. `realloc` keeps the block when the padded layout is unchanged, otherwise
+/// asks `GlobalAlloc::realloc` to resize it and bounds the result from the widest
+/// capability available; it allocates, copies and frees only when the alignment must
+/// grow, or when a block grown in place comes back with only the narrowed capability.
 ///
 /// Build the standard library with `--cfg cheri_no_heap_bounds` to turn this off.
 #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
@@ -404,34 +406,106 @@ mod cheri_heap {
         unsafe { cheri::bounds_set_exact(p, len) as *mut u8 }
     }
 
+    /// The allocator under the bounding layer, in padded sizes.
+    pub(super) trait Inner {
+        unsafe fn alloc(&self, len: usize, align: Alignment) -> *mut u8;
+        unsafe fn realloc(&self, p: *mut u8, len: usize, align: Alignment, new_len: usize)
+        -> *mut u8;
+        unsafe fn dealloc(&self, p: *mut u8, len: usize, align: Alignment);
+        /// The widest capability this layer can get for the block at `p`'s address
+        /// (`CheriBoundedAlloc::with_root`); `p` itself if there is none.
+        fn widen(&self, p: *mut u8) -> *mut u8 {
+            p
+        }
+    }
+
+    /// The global allocator (`__rust_*`).
+    pub(super) struct Global;
+
+    impl Inner for Global {
+        #[inline]
+        unsafe fn alloc(&self, len: usize, align: Alignment) -> *mut u8 {
+            // SAFETY: Upheld by caller.
+            unsafe { super::__rust_alloc(len, align) }
+        }
+        #[inline]
+        unsafe fn realloc(&self, p: *mut u8, len: usize, align: Alignment, new_len: usize) -> *mut u8 {
+            // SAFETY: Upheld by caller (`p` is a live, non-null block).
+            unsafe { super::__rust_realloc(NonNull::new_unchecked(p), len, align, new_len) }
+        }
+        #[inline]
+        unsafe fn dealloc(&self, p: *mut u8, len: usize, align: Alignment) {
+            // SAFETY: Upheld by caller.
+            unsafe { super::__rust_dealloc(NonNull::new_unchecked(p), len, align) }
+        }
+    }
+
+    /// Whether `c` is tagged and its bounds cover `[address, address + len)`.
     #[inline]
-    pub(super) unsafe fn realloc(ptr: NonNull<u8>, layout: Layout, new_size: usize) -> *mut u8 {
+    fn covers(c: *mut u8, len: usize) -> bool {
+        // Not `top_get`: QEMU-CHERI (ISAv9) has no `CGetTop`.
+        let (a, b) = (cheri::address_get(c), cheri::base_get(c));
+        cheri::tag_get(c) && b <= a && (a - b).checked_add(len).is_some_and(|e| e <= cheri::length_get(c))
+    }
+
+    /// `realloc` of a bounded block `p` (allocated for `layout`) to `new_size` bytes.
+    ///
+    /// The inner allocator always sees padded layouts, so `dealloc` stays consistent:
+    /// 1. Same padded length and alignment: return `p` unchanged; its bounds already
+    ///    cover the padding.
+    /// 2. Same alignment, different padded length (grow past the padding, or shrink): ask
+    ///    the inner allocator to resize. Bounds can only shrink, so the result is bounded
+    ///    from the widest capability available (the inner allocator's result, or one
+    ///    re-derived from a root). If the block stayed in place but only the narrowed
+    ///    capability came back, the block is moved instead.
+    /// 3. Otherwise (stricter alignment needed): allocate, copy and free.
+    #[inline]
+    pub(super) unsafe fn resize<I: Inner + ?Sized>(
+        inner: &I,
+        p: *mut u8,
+        layout: Layout,
+        new_size: usize,
+    ) -> *mut u8 {
         let (old_len, old_align) = padded(layout.size(), layout.alignment());
         let (new_len, new_align) = padded(new_size, layout.alignment());
         if new_len < new_size {
             return ptr::null_mut();
         }
         if new_len == old_len && new_align == old_align {
-            // Same padded block: the bounds are already exactly `new_len`.
-            return ptr.as_ptr();
+            return p;
         }
-        if new_len <= old_len && new_align <= old_align {
-            // Shrink: the allocator may keep the block in place.
-            // SAFETY: Upheld by caller; the old layout is the padded one `alloc` used.
-            unsafe {
-                return bound(super::__rust_realloc(ptr, old_len, old_align, new_len), new_len);
-            }
-        }
-        // Grow: allocate, copy and free, so the new block gets fresh bounds.
-        // SAFETY: Upheld by caller.
+        let keep = cmp_min(layout.size(), new_size);
+        // SAFETY: Upheld by caller; every layout passed to `inner` is the padded one it
+        // allocated (or, for a resized block, the one it resized to).
         unsafe {
-            let new_layout = Layout::from_size_alignment_unchecked(new_size, layout.alignment());
-            let new = super::alloc(new_layout);
-            if !new.is_null() {
-                ptr::copy_nonoverlapping(ptr.as_ptr(), new, cmp_min(layout.size(), new_size));
-                super::dealloc_nonnull(ptr, layout);
+            if new_align == old_align {
+                let r = inner.realloc(inner.widen(p), old_len, old_align, new_len);
+                if r.is_null() {
+                    return r;
+                }
+                let w = inner.widen(r);
+                if covers(w, new_len) {
+                    return bound(w, new_len);
+                }
+                // Resized in place, but no capability covers the new length. `r` still
+                // covers the old block (`p` is dead after `realloc`), so copy out of it.
+                let n = inner.alloc(new_len, new_align);
+                if n.is_null() {
+                    // Best effort: give the inner block its old size back.
+                    let _ = inner.realloc(w, new_len, old_align, old_len);
+                    return ptr::null_mut();
+                }
+                ptr::copy_nonoverlapping(r, n, keep);
+                inner.dealloc(w, new_len, old_align);
+                return bound(n, new_len);
             }
-            new
+            let n = inner.alloc(new_len, new_align);
+            if n.is_null() {
+                return n;
+            }
+            ptr::copy_nonoverlapping(p, n, keep);
+            inner.dealloc(inner.widen(p), old_len, old_align);
+            bound(n, new_len)
         }
     }
 
@@ -550,29 +624,31 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for CheriBoundedAlloc<A> {
 
     #[inline]
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let (old_len, old_align) = cheri_heap::padded(layout.size(), layout.alignment());
-        let (new_len, new_align) = cheri_heap::padded(new_size, layout.alignment());
-        if new_len < new_size {
-            return ptr::null_mut();
-        }
-        // In place (or by the inner allocator) only if the inner block's alignment still
-        // suffices and, for growth, a root can restore the inner allocator's capability.
-        if new_align <= old_align && (new_len <= old_len || !self.root.is_null()) {
-            // SAFETY: Upheld by caller; the old layout is the padded one `alloc` used.
-            unsafe {
-                let l = Layout::from_size_alignment_unchecked(old_len, old_align);
-                return cheri_heap::bound(self.inner.realloc(self.rederive(p), l, new_len), new_len);
-            }
-        }
         // SAFETY: Upheld by caller.
-        unsafe {
-            let new = self.alloc(Layout::from_size_alignment_unchecked(new_size, layout.alignment()));
-            if !new.is_null() {
-                ptr::copy_nonoverlapping(p, new, cmp::min(layout.size(), new_size));
-                self.dealloc(p, layout);
-            }
-            new
-        }
+        unsafe { cheri_heap::resize(self, p, layout, new_size) }
+    }
+}
+
+#[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
+impl<A: GlobalAlloc> cheri_heap::Inner for CheriBoundedAlloc<A> {
+    #[inline]
+    unsafe fn alloc(&self, len: usize, align: Alignment) -> *mut u8 {
+        // SAFETY: Upheld by caller (`len` non-zero).
+        unsafe { self.inner.alloc(Layout::from_size_alignment_unchecked(len, align)) }
+    }
+    #[inline]
+    unsafe fn realloc(&self, p: *mut u8, len: usize, align: Alignment, new_len: usize) -> *mut u8 {
+        // SAFETY: Upheld by caller.
+        unsafe { self.inner.realloc(p, Layout::from_size_alignment_unchecked(len, align), new_len) }
+    }
+    #[inline]
+    unsafe fn dealloc(&self, p: *mut u8, len: usize, align: Alignment) {
+        // SAFETY: Upheld by caller.
+        unsafe { self.inner.dealloc(p, Layout::from_size_alignment_unchecked(len, align)) }
+    }
+    #[inline]
+    fn widen(&self, p: *mut u8) -> *mut u8 {
+        self.rederive(p)
     }
 }
 
