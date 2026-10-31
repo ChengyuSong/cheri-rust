@@ -2450,6 +2450,10 @@ options! {
          `!mem.guard`, `llvm.mem.claim`, `mem.alloc_inbounds` facts, `\"mem.free\"`, \
          `!mem.last_use`) for the late LLVM CHERI passes; rustc itself makes no CHERI \
          decision (default: yes; CHERI targets only)"),
+    cheri_loan_ends: bool = (true, parse_bool, [TRACKED],
+        "CHERI M5r R3 (D17): record borrowck loan-end points, carry them through the MIR \
+         passes as `LoanEnd` markers and emit `!mem.last_use` from them (default: yes; \
+         `no` falls back to the R1 simple-case last uses)"),
     cheri_alloc_trusted_slices: bool = (true, parse_bool, [TRACKED],
         "CHERI M2: treat slices minted inside liballoc from `Vec<T, Global>` / `Box<[T], Global>` \
          (pointer allocation-bounded by liballoc, `len <= cap`) as `mem.alloc_inbounds` \

@@ -394,6 +394,14 @@ pub trait BuilderMethods<'a, 'tcx>:
     ) -> bool {
         false
     }
+
+    /// [LLM-generated] M5r R3 (D17): tag the *first* load/store/call (not an annotation or
+    /// other `llvm.*` intrinsic except memcpy/memmove/memset) emitted after `mark` in the
+    /// current block (from the block start if `mark` is `None` or in another block) with
+    /// `!mem.last_use !{loans}`. Returns whether one was tagged.
+    fn mem_last_use_first_since(&mut self, _mark: Option<Self::Value>, _loans: &[u64]) -> bool {
+        false
+    }
     fn inbounds_gep(
         &mut self,
         ty: Self::Type,

@@ -782,6 +782,13 @@ pub struct GlobalCtxt<'tcx> {
     /// Stores memory for globals (statics/consts).
     pub(crate) alloc_map: interpret::AllocMap<'tcx>,
 
+    /// [LLM-generated] CHERI M5r R3 (D17): borrowck loan-end points per body, recorded by
+    /// borrowck (CHERI targets with `-Zcheri-annotate` only) as `(location, loan id)` in
+    /// `mir_promoted` locations, and consumed once by `mir_drops_elaborated_and_const_checked`,
+    /// which turns them into `NonDivergingIntrinsic::LoanEnd` statements. Not tracked by the
+    /// dep graph: a missing entry (e.g. under incremental reuse) only loses markers (fail-safe).
+    pub cheri_loan_ends: Lock<FxHashMap<LocalDefId, Vec<(crate::mir::Location, u64)>>>,
+
     current_gcx: CurrentGcx,
 }
 
@@ -983,6 +990,7 @@ impl<'tcx> TyCtxt<'tcx> {
             caches: Default::default(),
             data_layout,
             alloc_map: interpret::AllocMap::new(),
+            cheri_loan_ends: Default::default(),
             current_gcx,
         });
 

@@ -234,6 +234,50 @@ impl<'tcx> OutOfScopePrecomputer<'_, 'tcx> {
     }
 }
 
+/// [LLM-generated] CHERI M5r R3 (D17): out-of-scope points of *every* non-fake
+/// `Rvalue::Ref` in `body`, not only the borrows `BorrowSet` tracks (it skips
+/// borrows of immutable locals and through shared references, which borrowck does
+/// not need but a loan-end fact does). Returns `(location, ordinal)` where the
+/// ordinal numbers the borrow statements in body order.
+pub(crate) fn cheri_all_loans_out_of_scope<'tcx>(
+    body: &Body<'tcx>,
+    regioncx: &RegionInferenceContext<'tcx>,
+) -> Vec<(Location, usize)> {
+    let mut prec = OutOfScopePrecomputer {
+        visited: DenseBitSet::new_empty(body.basic_blocks.len()),
+        visit_stack: vec![],
+        body,
+        regioncx,
+        borrows_out_of_scope_at_location: FxIndexMap::default(),
+    };
+    let mut n = 0usize;
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
+        for (i, stmt) in data.statements.iter().enumerate() {
+            if let mir::StatementKind::Assign(assign) = &stmt.kind
+                && let mir::Rvalue::Ref(region, kind, _) = &assign.1
+                && !matches!(kind, mir::BorrowKind::Fake(_))
+                && region.is_var()
+            {
+                let vid = region.as_var();
+                prec.visited.clear();
+                prec.precompute_borrows_out_of_scope(
+                    BorrowIndex::from_usize(n),
+                    vid,
+                    Location { block: bb, statement_index: i },
+                );
+                n += 1;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (loc, idxs) in prec.borrows_out_of_scope_at_location {
+        for i in idxs {
+            out.push((loc, i.index()));
+        }
+    }
+    out
+}
+
 // This is `pub` because it's used by unstable external borrowck data users, see `consumers.rs`.
 pub fn calculate_borrows_out_of_scope_at_location<'tcx>(
     body: &Body<'tcx>,

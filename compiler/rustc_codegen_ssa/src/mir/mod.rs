@@ -149,6 +149,11 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
     /// M5r: `!mem.last_use` loans for the next call `do_call` builds.
     mem_call_last_use: Option<Vec<u64>>,
 
+    /// M5r R3 (D17): `LoanEnd` ids waiting for a carrier, searched from the mark on.
+    mem_loan_pending: Option<(Option<Bx::Value>, Vec<u64>)>,
+    /// [LLM-generated] D17: loan ends carried into a single-predecessor successor.
+    mem_loan_carry: rustc_data_structures::fx::FxHashMap<mir::BasicBlock, Vec<u64>>,
+
     /// M5r: simple-case loan last uses of this body.
     mem_last_uses: mem_annot::LastUses,
 
@@ -301,11 +306,15 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         mem_guard_active: None,
         mem_call_bundle: None,
         mem_call_last_use: None,
+        mem_loan_pending: None,
+        mem_loan_carry: Default::default(),
         mem_last_uses: Default::default(),
         mem_stats: Default::default(),
     };
     fx.cheri_sites = fx.find_cheri_index_sites();
-    fx.mem_last_uses = fx.find_last_uses();
+    if !cx.tcx().sess.opts.unstable_opts.cheri_loan_ends {
+        fx.mem_last_uses = fx.find_last_uses();
+    }
     fx.cheri_check_census();
 
     // It may seem like we should iterate over `required_consts` to ensure they all successfully

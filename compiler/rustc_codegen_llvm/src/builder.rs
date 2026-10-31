@@ -1060,6 +1060,51 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         unsafe { llvm::LLVMGetLastInstruction(llvm::LLVMGetInsertBlock(self.llbuilder)) }
     }
 
+    fn mem_last_use_first_since(&mut self, mark: Option<&'ll Value>, loans: &[u64]) -> bool {
+        // Forward only: the carrier must be at or after the loan-end point on this path.
+        let found = unsafe {
+            let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let mut cur = match mark {
+                Some(m) if std::ptr::eq(llvm::LLVMGetInstructionParent(m), bb) => {
+                    llvm::LLVMGetNextInstruction(m)
+                }
+                _ => llvm::LLVMGetFirstInstruction(bb),
+            };
+            let mut found = None;
+            while let Some(i) = cur {
+                let ok = if llvm::LLVMIsALoadInst(i).is_some() || llvm::LLVMIsAStoreInst(i).is_some() {
+                    true
+                } else if llvm::LLVMIsACallInst(i).is_some() {
+                    match llvm::LLVMGetCalledValue(i) {
+                        Some(f) => {
+                            let n = llvm::get_value_name(f);
+                            !n.starts_with(b"llvm.")
+                                || n.starts_with(b"llvm.memcpy")
+                                || n.starts_with(b"llvm.memmove")
+                                || n.starts_with(b"llvm.memset")
+                        }
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+                if ok {
+                    found = Some(i);
+                    break;
+                }
+                cur = llvm::LLVMGetNextInstruction(i);
+            }
+            found
+        };
+        match found {
+            Some(i) => {
+                self.mem_last_use(i, loans);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn mem_last_use_since(
         &mut self,
         mark: Option<&'ll Value>,

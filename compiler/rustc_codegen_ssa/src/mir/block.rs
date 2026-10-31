@@ -1621,6 +1621,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             debug!("codegen_block({:?}={:?})", bb, data);
 
             // M5r: `!mem.guard` on a site's access, `!mem.last_use` on loan last uses.
+            self.mem_loan_block_start(bb);
             let mut guard = self.mem_guards.remove(&bb);
             for (i, statement) in data.statements.iter().enumerate() {
                 let is_site = guard.is_some_and(|g| g.site.stmt == i);
@@ -1633,6 +1634,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     .contains_key(&(bb, UseAt::Stmt(i)))
                     .then(|| bx.mem_mark());
                 self.codegen_statement(bx, statement);
+                if self.mem_loan_pending.is_some() {
+                    self.mem_loan_flush(bx);
+                }
                 if let Some(mark) = mark {
                     self.mem_last_use_stmt(bx, mark, bb, i);
                 }
@@ -1648,7 +1652,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.codegen_stmt_debuginfos(bx, &data.after_last_stmt_debuginfos);
 
             self.mem_last_use_term(bb);
+            self.mem_loan_before_term(bx, data.terminator());
             let merging_succ = self.codegen_terminator(bx, bb, data.terminator());
+            self.mem_loan_block_end(data.terminator(), matches!(merging_succ, MergingSucc::True));
             // Never let a pending marker reach an unrelated call.
             self.mem_call_bundle = None;
             self.mem_call_last_use = None;

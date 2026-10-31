@@ -1188,6 +1188,13 @@ pub(crate) struct MemStats {
     pub last_use_stmts: u32,
     pub last_use_stmts_missed: u32,
     pub last_use_calls: u32,
+    /// D17 `LoanEnd` markers reached at codegen, and where their ids went.
+    pub loan_ends: u32,
+    pub loan_ends_placed: u32,
+    pub loan_ends_on_call: u32,
+    pub loan_ends_at_return: u32,
+    pub loan_ends_missed: u32,
+    pub loan_ends_carried: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1351,6 +1358,105 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
     }
 
+    /// [LLM-generated] M5r R3 (D17): a `LoanEnd` marker. The loan's ids wait for the first
+    /// memory access or call emitted at or after this point on the same straight-line path
+    /// (see `mem_loan_flush` / `mem_loan_block_end`). Placing it later than the real last
+    /// use only delays invalidation; it is never placed earlier.
+    pub(crate) fn mem_loan_end(&mut self, bx: &mut Bx, id: u64) {
+        if !self.mem_annotate() {
+            return;
+        }
+        self.mem_stats.loan_ends += 1;
+        let id = {
+            use std::hash::{Hash, Hasher};
+            let mut h = rustc_data_structures::fx::FxHasher::default();
+            self.cx.tcx().symbol_name(self.instance).name.hash(&mut h);
+            id.hash(&mut h);
+            (h.finish() & 0x1fff_ffff_ffff_ffff) | (1 << 61)
+        };
+        // Older pending ids found no carrier up to here, so they can share the new mark.
+        self.mem_loan_flush(bx);
+        let mark = bx.mem_mark();
+        match &mut self.mem_loan_pending {
+            Some((m, ids)) => {
+                *m = mark;
+                ids.push(id);
+            }
+            None => self.mem_loan_pending = Some((mark, vec![id])),
+        }
+    }
+
+    /// Try to place the pending loan ends on an instruction emitted since their mark.
+    pub(crate) fn mem_loan_flush(&mut self, bx: &mut Bx) {
+        if let Some((mark, ids)) = &self.mem_loan_pending {
+            if bx.mem_last_use_first_since(*mark, ids) {
+                self.mem_stats.loan_ends_placed += ids.len() as u32;
+                self.mem_loan_pending = None;
+            }
+        }
+    }
+
+    /// Before the terminator: flush; a call/drop terminator carries what is left.
+    pub(crate) fn mem_loan_before_term(&mut self, bx: &mut Bx, term: &mir::Terminator<'tcx>) {
+        self.mem_loan_flush(bx);
+        if matches!(term.kind, mir::TerminatorKind::Call { .. } | mir::TerminatorKind::Drop { .. })
+            && let Some((_, ids)) = self.mem_loan_pending.take()
+        {
+            self.mem_stats.loan_ends_on_call += ids.len() as u32;
+            self.mem_call_last_use.get_or_insert_with(Vec::new).extend(ids);
+        }
+    }
+
+    /// After the terminator: unless the successor is merged into this backend block, the
+    /// ids that found no carrier are dropped (counted; at a return the frame dies anyway).
+    pub(crate) fn mem_loan_block_end(&mut self, term: &mir::Terminator<'tcx>, merged: bool) {
+        if merged {
+            return;
+        }
+        if let Some((_, ids)) = self.mem_loan_pending.take() {
+            use mir::TerminatorKind as T;
+            if matches!(term.kind, T::Return) {
+                self.mem_stats.loan_ends_at_return += ids.len() as u32;
+                return;
+            }
+            // Carry the ids into each normal (non-unwind) successor whose only MIR
+            // predecessor is this block: such a block is entered only from here and is
+            // codegen'd after it (RPO), so its first access is still forward of the
+            // loan end on every path. Other successors lose the fact (fail-safe).
+            let succs: Vec<mir::BasicBlock> = match &term.kind {
+                T::Goto { target } | T::Assert { target, .. } => vec![*target],
+                T::SwitchInt { targets, .. } => targets.all_targets().to_vec(),
+                T::FalseEdge { real_target, .. } | T::FalseUnwind { real_target, .. } => {
+                    vec![*real_target]
+                }
+                _ => vec![],
+            };
+            let preds = self.mir.basic_blocks.predecessors();
+            let mut carried = false;
+            for succ in succs {
+                if succ != mir::START_BLOCK && preds[succ].len() == 1 {
+                    self.mem_loan_carry.entry(succ).or_default().extend(ids.iter().copied());
+                    carried = true;
+                }
+            }
+            if carried {
+                self.mem_stats.loan_ends_carried += ids.len() as u32;
+            } else {
+                self.mem_stats.loan_ends_missed += ids.len() as u32;
+            }
+        }
+    }
+
+    /// Block start: ids carried from the unique predecessor become pending again.
+    pub(crate) fn mem_loan_block_start(&mut self, bb: mir::BasicBlock) {
+        if let Some(ids) = self.mem_loan_carry.remove(&bb) {
+            match &mut self.mem_loan_pending {
+                Some((_, v)) => v.extend(ids),
+                None => self.mem_loan_pending = Some((None, ids)),
+            }
+        }
+    }
+
     /// Terminator codegen hook: the loans whose last use is this call.
     pub(crate) fn mem_last_use_term(&mut self, bb: BasicBlock) {
         if let Some(loans) = self.mem_last_uses.at.get(&(bb, UseAt::Term)) {
@@ -1367,7 +1473,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let s = &self.mem_stats;
         let tcx = self.cx.tcx();
         let line = format!(
-            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\n",
+            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\n",
             tcx.symbol_name(self.instance).name,
             s.sites_matched,
             s.sites_unmatched,
@@ -1380,6 +1486,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             s.last_use_stmts,
             s.last_use_stmts_missed,
             s.last_use_calls,
+            s.loan_ends,
+            s.loan_ends_placed,
+            s.loan_ends_on_call,
+            s.loan_ends_at_return,
+            s.loan_ends_missed,
+            s.loan_ends_carried,
         );
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {

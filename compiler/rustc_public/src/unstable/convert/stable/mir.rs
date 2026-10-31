@@ -533,6 +533,7 @@ impl<'tcx> Stable<'tcx> for mir::NonDivergingIntrinsic<'tcx> {
                     count: copy_non_overlapping.count.stable(tables, cx),
                 })
             }
+            NonDivergingIntrinsic::LoanEnd(id) => crate::mir::NonDivergingIntrinsic::LoanEnd(*id),
         }
     }
 }
