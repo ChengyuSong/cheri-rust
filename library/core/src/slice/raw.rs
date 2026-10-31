@@ -142,8 +142,7 @@ pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T]
         // (or discharge it when provenance already proves the bound).
         let data = crate::intrinsics::cheri_contract_narrow(
             data,
-            // M5r R1: branch-free; the safety contract bounds the size by `isize::MAX`.
-            len.wrapping_mul(crate::mem::size_of::<T>()),
+            len.saturating_mul(crate::mem::size_of::<T>()),
         );
         &*ptr::slice_from_raw_parts(data, len)
     }
@@ -204,8 +203,7 @@ pub const unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a m
         );
         let data = crate::intrinsics::cheri_contract_narrow(
             data,
-            // M5r R1: branch-free; the safety contract bounds the size by `isize::MAX`.
-            len.wrapping_mul(crate::mem::size_of::<T>()),
+            len.saturating_mul(crate::mem::size_of::<T>()),
         ) as *mut T;
         &mut *ptr::slice_from_raw_parts_mut(data, len)
     }
