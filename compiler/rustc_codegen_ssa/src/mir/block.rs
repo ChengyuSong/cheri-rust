@@ -21,6 +21,7 @@ use rustc_span::{Span, Spanned, bug, span_bug};
 use rustc_target::callconv::{ArgAbi, ArgAttributes, CastTarget, FnAbi, IndirectMode, PassMode};
 use tracing::{debug, info};
 
+use super::mem_annot::UseAt;
 use super::operand::OperandRef;
 use super::operand::OperandValue::{self, Immediate, Pair, Ref, ZeroSized};
 use super::place::{PlaceRef, PlaceValue};
@@ -253,6 +254,9 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
             "a return slot must be provided if and only if the return is `PassMode::Indirect`",
         );
 
+        // M5r: pending `"mem.check"` / `"mem.free"` bundle and `!mem.last_use`.
+        fx.mem_prepare_call(bx, llargs, instance);
+
         if kind == CallKind::Tail {
             bx.tail_call(
                 fn_ty,
@@ -295,6 +299,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 for &(tmp, size) in lifetime_ends_after_call {
                     bx.lifetime_end(tmp, size);
                 }
+                let invokeret = fx.mem_call_return_claim(bx, invokeret, fn_abi, instance);
                 fx.store_return(bx, ret_dest, &fn_abi.ret, invokeret);
 
                 // If the return value was retagged as it was stored,
@@ -323,6 +328,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 for &(tmp, size) in lifetime_ends_after_call {
                     bx.lifetime_end(tmp, size);
                 }
+                let llret = fx.mem_call_return_claim(bx, llret, fn_abi, instance);
                 fx.store_return(bx, ret_dest, &fn_abi.ret, llret);
                 self.funclet_br(fx, bx, target, mergeable_succ, &[])
             } else {
@@ -812,6 +818,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             AssertKind::BoundsCheck { len, index } => {
                 let len = self.codegen_operand(bx, len).immediate();
                 let index = self.codegen_operand(bx, index).immediate();
+                // M5r: the `"mem.check"` marker, attached to the panic call by `do_call`.
+                self.mem_check_marker(bx, helper.bb, len);
                 // It's `fn panic_bounds_check(index: usize, len: usize)`,
                 // and `#[track_caller]` adds an implicit third argument.
                 (LangItem::PanicBoundsCheck, vec![index, len, location])
@@ -1612,12 +1620,38 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
             debug!("codegen_block({:?}={:?})", bb, data);
 
-            for statement in &data.statements {
+            // M5r: `!mem.guard` on a site's access, `!mem.last_use` on loan last uses.
+            let mut guard = self.mem_guards.remove(&bb);
+            for (i, statement) in data.statements.iter().enumerate() {
+                let is_site = guard.is_some_and(|g| g.site.stmt == i);
+                if is_site {
+                    self.mem_guard_active = guard.take();
+                }
+                let mark = self
+                    .mem_last_uses
+                    .at
+                    .contains_key(&(bb, UseAt::Stmt(i)))
+                    .then(|| bx.mem_mark());
                 self.codegen_statement(bx, statement);
+                if let Some(mark) = mark {
+                    self.mem_last_use_stmt(bx, mark, bb, i);
+                }
+                if is_site {
+                    let g = self.mem_guard_active.take().unwrap();
+                    if g.used {
+                        self.mem_stats.guards += 1;
+                    } else {
+                        self.mem_stats.guards_missed += 1;
+                    }
+                }
             }
             self.codegen_stmt_debuginfos(bx, &data.after_last_stmt_debuginfos);
 
+            self.mem_last_use_term(bb);
             let merging_succ = self.codegen_terminator(bx, bb, data.terminator());
+            // Never let a pending marker reach an unrelated call.
+            self.mem_call_bundle = None;
+            self.mem_call_last_use = None;
             if let MergingSucc::False = merging_succ {
                 break;
             }

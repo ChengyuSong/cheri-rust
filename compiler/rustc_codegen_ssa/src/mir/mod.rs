@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::iter;
 
 use rustc_index::IndexVec;
@@ -21,6 +22,7 @@ mod coverageinfo;
 pub mod debuginfo;
 mod intrinsic;
 mod locals;
+mod mem_annot;
 pub mod naked_asm;
 pub mod operand;
 pub mod place;
@@ -127,6 +129,31 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
 
     /// Caller location propagated if this function has `#[track_caller]`.
     caller_location: Option<OperandRef<'tcx, Bx::Value>>,
+
+    /// M5r: last `SourceInfo.scope` from `set_debug_loc` (verified-producer flag on claims).
+    pub(crate) current_source_scope: Cell<mir::SourceScope>,
+
+    /// M5r: matched `a[i]` sites, keyed by the block of their bounds check.
+    cheri_sites:
+        rustc_data_structures::fx::FxHashMap<mir::BasicBlock, mem_annot::CheriIndexSite<'tcx>>,
+
+    /// M5r: `!mem.guard` ids for site accesses, keyed by the accessing block.
+    mem_guards: rustc_data_structures::fx::FxHashMap<mir::BasicBlock, mem_annot::MemGuard<'tcx>>,
+
+    /// M5r: the guard of the statement being emitted, if it is a site's access.
+    mem_guard_active: Option<mem_annot::MemGuard<'tcx>>,
+
+    /// M5r: operand bundle for the next call `do_call` builds (`"mem.check"`).
+    mem_call_bundle: Option<(&'static str, Vec<Bx::Value>)>,
+
+    /// M5r: `!mem.last_use` loans for the next call `do_call` builds.
+    mem_call_last_use: Option<Vec<u64>>,
+
+    /// M5r: simple-case loan last uses of this body.
+    mem_last_uses: mem_annot::LastUses,
+
+    /// M5r: marker counts (`MEM_ANNOT_STATS_FILE`).
+    mem_stats: mem_annot::MemStats,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -268,7 +295,18 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         per_local_var_debug_info: None,
         caller_location: None,
         nop_landing_pads,
+        current_source_scope: Cell::new(mir::OUTERMOST_SOURCE_SCOPE),
+        cheri_sites: Default::default(),
+        mem_guards: Default::default(),
+        mem_guard_active: None,
+        mem_call_bundle: None,
+        mem_call_last_use: None,
+        mem_last_uses: Default::default(),
+        mem_stats: Default::default(),
     };
+    fx.cheri_sites = fx.find_cheri_index_sites();
+    fx.mem_last_uses = fx.find_last_uses();
+    fx.cheri_check_census();
 
     // It may seem like we should iterate over `required_consts` to ensure they all successfully
     // evaluate; however, the `MirUsedCollector` already did that during the collection phase of
@@ -317,7 +355,8 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
     // Allocate variable and temp allocas
     let local_values = {
-        let args = arg_local_refs(&mut start_bx, &mut fx, &memory_locals);
+        let mut args = arg_local_refs(&mut start_bx, &mut fx, &memory_locals);
+        fx.mem_export_entry_claims(&mut start_bx, &mut args);
 
         let mut allocate_local = |local: Local| {
             let decl = &mir.local_decls[local];
@@ -383,6 +422,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     for bb in unreached_blocks.iter() {
         fx.codegen_block_as_unreachable(bb);
     }
+    fx.mem_dump_stats();
 }
 
 /// Replace `clone` calls that come from `use` statements with direct copies if possible.

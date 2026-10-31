@@ -158,6 +158,12 @@ pub(crate) struct FullCx<'ll, 'tcx> {
     /// Cached Objective-C class type
     pub objc_class_t: Cell<Option<&'ll Type>>,
 
+    /// M5r: target-neutral memory-annotation operand bundle (`"mem.check"` / `"mem.free"`)
+    /// that the next `call`/`invoke` built in this CGU carries.
+    pub mem_pending_bundle: RefCell<Option<(&'static str, Vec<&'ll Value>)>>,
+    /// M5r: `!mem.last_use` loan ids for the next `call`/`invoke` built in this CGU.
+    pub mem_pending_last_use: RefCell<Option<Vec<u64>>>,
+
     /// Cache of Objective-C class references
     pub objc_classrefs: RefCell<FxHashMap<Symbol, &'ll Value>>,
 
@@ -749,6 +755,8 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
                 global_gen_sym_counter: Cell::new(0),
                 renamed_statics: Default::default(),
                 objc_class_t: Cell::new(None),
+                mem_pending_bundle: RefCell::new(None),
+                mem_pending_last_use: RefCell::new(None),
                 objc_classrefs: Default::default(),
                 objc_selrefs: Default::default(),
                 offload_globals: Default::default(),

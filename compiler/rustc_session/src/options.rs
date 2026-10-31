@@ -2441,8 +2441,15 @@ options! {
          (`off` (default), `narrow`, or `elide`). With `narrow`, narrows the M2 annotations \
          prove redundant (retained check + allocation-bounded base) are removed by LLVM's \
          CheriSkipNarrow by default (allocation-level threat model); \
-         `-Cllvm-args=-cheri-skip-narrow=false` keeps every narrow (stronger mode)"
+         `-Cllvm-args=-cheri-skip-narrow=false` keeps every narrow (stronger mode). \
+         M5r R1: accepted for compatibility but has no effect (rustc only emits markers; \
+         the policy moves to the late LLVM pass in R2)"
     ),
+    cheri_annotate: bool = (true, parse_bool, [TRACKED],
+        "CHERI M5r: emit the target-neutral memory annotations (`\"mem.check\"` markers, \
+         `!mem.guard`, `llvm.mem.claim`, `mem.alloc_inbounds` facts, `\"mem.free\"`, \
+         `!mem.last_use`) for the late LLVM CHERI passes; rustc itself makes no CHERI \
+         decision (default: yes; CHERI targets only)"),
     cheri_alloc_trusted_slices: bool = (true, parse_bool, [TRACKED],
         "CHERI M2: treat slices minted inside liballoc from `Vec<T, Global>` / `Box<[T], Global>` \
          (pointer allocation-bounded by liballoc, `len <= cap`) as `mem.alloc_inbounds` \

@@ -31,6 +31,8 @@ fn copy_intrinsic<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let flags = if volatile { MemFlags::VOLATILE } else { MemFlags::empty() };
     // Handling of CHERI capabilities could probably be more efficient.
     let preserve_tags = PreserveCheriTags::Unknown;
+    let src = super::mem_annot::mem_op_claim(bx, src, size);
+    let dst = super::mem_annot::mem_op_claim(bx, dst, size);
     if allow_overlap {
         bx.memmove(dst, align, src, align, size, flags, preserve_tags);
     } else {
@@ -51,6 +53,7 @@ fn memset_intrinsic<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let align = layout.align.abi;
     let size = bx.mul(bx.const_usize(size.bytes()), count);
     let flags = if volatile { MemFlags::VOLATILE } else { MemFlags::empty() };
+    let dst = super::mem_annot::mem_op_claim(bx, dst, size);
     bx.memset(dst, val, size, align, flags);
 }
 
@@ -598,6 +601,20 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             sym::cold_path => {
                 // This is a no-op. The intrinsic is just a hint to the optimizer.
                 OperandValue::ZeroSized
+            }
+
+            // M5r: the conversion-point contract (`from_raw_parts`, `Box::from_raw`, ...)
+            // becomes a claim; rustc no longer narrows or discharges it. Inside a verified
+            // producer scope the claim carries `CF_Verified`.
+            sym::cheri_contract_narrow => {
+                let val = match args[0].val {
+                    v @ (OperandValue::Immediate(_) | OperandValue::Pair(..)) => v,
+                    OperandValue::Ref(_) | OperandValue::ZeroSized => {
+                        bug!("cheri_contract_narrow expects a pointer immediate");
+                    }
+                };
+                let len = args[1].immediate();
+                self.mem_contract_claim(bx, val, len, source_info.scope)
             }
 
             _ => {

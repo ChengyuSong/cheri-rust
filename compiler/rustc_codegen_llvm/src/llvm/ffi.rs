@@ -1192,6 +1192,16 @@ unsafe extern "C" {
     // Operations on instructions
     pub(crate) fn LLVMIsAInstruction(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsAGetElementPtrInst(Val: &Value) -> Option<&Value>;
+    // M5r: instruction walking for `!mem.last_use` placement.
+    pub(crate) fn LLVMGetFirstInstruction(BB: &BasicBlock) -> Option<&Value>;
+    pub(crate) fn LLVMGetLastInstruction(BB: &BasicBlock) -> Option<&Value>;
+    pub(crate) fn LLVMGetNextInstruction(Inst: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMGetInstructionParent(Inst: &Value) -> &BasicBlock;
+    pub(crate) fn LLVMIsALoadInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsAStoreInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsACallInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMGetNumArgOperands(Instr: &Value) -> c_uint;
+    pub(crate) fn LLVMGetCalledValue(Instr: &Value) -> Option<&Value>;
     pub(crate) fn LLVMGetFirstBasicBlock(Fn: &Value) -> &BasicBlock;
     pub(crate) fn LLVMGetOperand(Val: &Value, Index: c_uint) -> Option<&Value>;
 

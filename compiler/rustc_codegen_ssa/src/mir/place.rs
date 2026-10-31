@@ -359,7 +359,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 bug!("using still-pending operand local {:?} as place", place_ref);
             }
         };
-        for elem in place_ref.projection[base..].iter() {
+        for (pos, elem) in place_ref.projection.iter().enumerate().skip(base) {
+            let is_index = matches!(
+                *elem,
+                mir::ProjectionElem::Index(_)
+                    | mir::ProjectionElem::ConstantIndex { from_end: false, .. }
+            );
             cg_base = match *elem {
                 mir::ProjectionElem::Deref => bx.load_operand(cg_base).deref(bx.cx()),
                 mir::ProjectionElem::PhantomDeref => {
@@ -412,6 +417,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
                 mir::ProjectionElem::Downcast(_, v) => cg_base.project_downcast(bx, v),
             };
+            // M5r: `!mem.guard` on the index GEP of a matched site's access.
+            if is_index && self.mem_guard_active.is_some() {
+                self.mem_guard_place(bx, place_ref, pos, cg_base.val.llval);
+            }
         }
         debug!("codegen_place(place={:?}) => {:?}", place_ref, cg_base);
         cg_base
