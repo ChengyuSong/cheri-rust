@@ -373,6 +373,9 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
 
     sym::rustc_canonical_symbol,
     sym::rustc_diagnostic_item,
+    // CHERI M3.2 (local prototype): injected by core::contracts::{requires, mem_contract}.
+    sym::rustc_mem_contract,
+    sym::rustc_mem_contract_site,
     sym::prelude_import,
     sym::rustc_paren_sugar,
     sym::rustc_inherit_overflow_checks,

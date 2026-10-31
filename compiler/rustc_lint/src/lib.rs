@@ -69,6 +69,7 @@ mod passes;
 mod precedence;
 mod ptr_nulls;
 mod raw_borrows_via_references;
+mod mem_contract_undischarged;
 mod redundant_semicolon;
 mod reference_casting;
 mod runtime_symbols;
@@ -116,6 +117,7 @@ use opaque_hidden_inferred_bound::*;
 use precedence::*;
 use ptr_nulls::*;
 use raw_borrows_via_references::*;
+use mem_contract_undischarged::*;
 use redundant_semicolon::*;
 use reference_casting::*;
 use runtime_symbols::*;
@@ -268,6 +270,7 @@ late_lint_methods!(
             // Depends on referenced function signatures in expressions
             PtrNullChecks: PtrNullChecks,
             RawBorrowsViaReferences: RawBorrowsViaReferences,
+            MemContractUndischarged: MemContractUndischarged,
             RuntimeSymbols: RuntimeSymbols,
             ShadowedIntoIter: ShadowedIntoIter,
             StaticMutRefs: StaticMutRefs,

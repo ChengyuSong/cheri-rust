@@ -245,6 +245,9 @@
 #![warn(missing_debug_implementations)]
 #![allow(explicit_outlives_requirements)]
 #![allow(internal_features)]
+// CHERI M3.5: see core/alloc — warn-by-default lint silenced for stdlib.
+#![allow(unknown_lints, mem_contract_undischarged)]
+
 #![deny(implicit_provenance_casts)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(rustdoc::redundant_explicit_links)]

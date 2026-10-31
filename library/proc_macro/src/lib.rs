@@ -31,6 +31,8 @@
 #![cfg_attr(bootstrap, feature(mem_conjure_zst))]
 #![recursion_limit = "256"]
 #![allow(internal_features)]
+#![allow(unknown_lints, mem_contract_undischarged)] // CHERI M3.5: warn-by-default; stdlib silenced
+
 #![deny(ffi_unwind_calls)]
 #![allow(rustc::internal)] // Can't use FxHashMap when compiled as part of the standard library
 #![warn(rustdoc::unescaped_backticks)]

@@ -1438,3 +1438,22 @@ pub(crate) struct ConstContinueUnknownJumpTarget {
     #[primary_span]
     pub span: Span,
 }
+
+#[derive(Diagnostic)]
+#[diag(
+    "reading union field of type `{$ty}` from `{$union_name}`: it contains a {$kind}; \
+     pointer type punning through unions is not allowed in CHERI-contracted code"
+)]
+#[note(
+    "safe interfaces must expect one specific type; for a C/C++ tagged union use a typed \
+     accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a \
+     `valid_ref` contract"
+)]
+pub(crate) struct CheriUnionPointerRead {
+    #[primary_span]
+    #[label("pointer-carrying union field read")]
+    pub(crate) span: Span,
+    pub(crate) ty: String,
+    pub(crate) union_name: String,
+    pub(crate) kind: &'static str,
+}

@@ -43,6 +43,59 @@ struct UnsafetyVisitor<'a, 'tcx> {
 }
 
 impl<'tcx> UnsafetyVisitor<'_, 'tcx> {
+    /// CHERI M4.0 union policy: in contracted code, reading a union field whose type
+    /// is or contains a reference, slice, `Box`, raw pointer, `NonNull` or fn pointer
+    /// (or a generic parameter that may be one) is a hard error. Rust does not support
+    /// pointer type punning through unions; use a C/C++ typed accessor that checks the
+    /// tag and returns a typed pointer instead.
+    ///
+    /// Contracted code = CHERI target with `-Zcheri-contract-narrow` on (the default).
+    /// Exempt: crates with `#![feature(staged_api)]` (core/alloc/std), and
+    /// `MaybeUninit` (lang item). Plain-data unions are never affected.
+    fn cheri_check_union_read(
+        &mut self,
+        span: Span,
+        adt: ty::AdtDef<'tcx>,
+        field_ty: Ty<'tcx>,
+        how: &'static str,
+    ) {
+        let tcx = self.tcx;
+        let sess = tcx.sess;
+        let census = sess.opts.unstable_opts.cheri_union_census;
+        let contracted = sess.target.is_like_cheri && sess.opts.unstable_opts.cheri_contract_narrow;
+        if !contracted && !census {
+            return;
+        }
+        let mut seen = Vec::new();
+        let Some(kind) = cheri_pointer_like(tcx, field_ty, 0, &mut seen) else { return };
+        let is_maybe_uninit = tcx.is_lang_item(adt.did(), LangItem::MaybeUninit);
+        let std_crate = tcx.features().staged_api();
+        if census {
+            let category = if is_maybe_uninit {
+                "maybe_uninit"
+            } else if std_crate {
+                "std_exempt"
+            } else {
+                "rejected"
+            };
+            let loc = sess.source_map().span_to_diagnostic_string(span);
+            with_no_trimmed_paths!(eprintln!(
+                "CHERI-UNION-CENSUS\t{}\t{category}\t{how}\t{kind}\t{}\t{field_ty}\t{loc}",
+                tcx.crate_name(rustc_span::def_id::LOCAL_CRATE),
+                tcx.def_path_str(adt.did()),
+            ));
+        }
+        if !contracted || is_maybe_uninit || std_crate {
+            return;
+        }
+        tcx.dcx().emit_err(CheriUnionPointerRead {
+            span,
+            ty: field_ty.to_string(),
+            union_name: tcx.def_path_str(adt.did()),
+            kind,
+        });
+    }
+
     fn in_safety_context(&mut self, safety_context: SafetyContext, f: impl FnOnce(&mut Self)) {
         let prev_context = mem::replace(&mut self.safety_context, safety_context);
 
@@ -286,6 +339,21 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                         }
                     }
                     if adt_def.is_union() {
+                        if let ty::Adt(_, args) = pat.ty.kind() {
+                            for sub in subpatterns {
+                                if !matches!(sub.pattern.kind, PatKind::Wild) {
+                                    let fty = adt_def.non_enum_variant().fields[sub.field]
+                                        .ty(self.tcx, args)
+                                        .skip_norm_wip();
+                                    self.cheri_check_union_read(
+                                        sub.pattern.span,
+                                        *adt_def,
+                                        fty,
+                                        "pattern",
+                                    );
+                                }
+                            }
+                        }
                         let old_in_union_destructure =
                             std::mem::replace(&mut self.in_union_destructure, true);
                         visit::walk_pat(self, pat);
@@ -578,6 +646,16 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                     if adt_def.variant(variant_index).fields[name].safety.is_unsafe() {
                         self.requires_unsafe(expr.span, UseOfUnsafeField);
                     } else if adt_def.is_union() {
+                        // (`*u.f = x` is a read of `u.f`: the visit_expr prologue clears
+                        // `assignment_info` at a Deref/Index.)
+                        if self.assignment_info.is_none() {
+                            if let ty::Adt(_, args) = lhs.ty.kind() {
+                                let fty = adt_def.variant(variant_index).fields[name]
+                                    .ty(self.tcx, args)
+                                    .skip_norm_wip();
+                                self.cheri_check_union_read(expr.span, *adt_def, fty, "field");
+                            }
+                        }
                         if let Some(assigned_ty) = self.assignment_info {
                             if assigned_ty.needs_drop(self.tcx, self.typing_env) {
                                 // This would be unsafe, but should be outright impossible since we
@@ -1113,5 +1191,54 @@ pub(crate) fn check_unsafety(tcx: TyCtxt<'_>, def: LocalDefId) {
             block_span,
             UnusedUnsafe { span: block_span, enclosing: enclosing_unsafe },
         );
+    }
+}
+
+/// CHERI M4.0: does `ty` structurally contain a pointer-like value? Returns what.
+fn cheri_pointer_like<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+    depth: u32,
+    seen: &mut Vec<DefId>,
+) -> Option<&'static str> {
+    if depth > 24 {
+        return None;
+    }
+    match *ty.kind() {
+        ty::Ref(_, pointee, _) => Some(match pointee.kind() {
+            ty::Slice(_) | ty::Str => "slice reference",
+            _ => "reference",
+        }),
+        ty::RawPtr(..) => Some("raw pointer"),
+        ty::FnPtr(..) => Some("fn pointer"),
+        ty::Adt(def, args) => {
+            if def.is_box() {
+                return Some("Box");
+            }
+            if tcx.is_lang_item(def.did(), LangItem::NonNull) {
+                return Some("NonNull");
+            }
+            if def.is_phantom_data() || seen.contains(&def.did()) {
+                return None;
+            }
+            seen.push(def.did());
+            for f in def.all_fields() {
+                let fty = f.ty(tcx, args).skip_norm_wip();
+                if let Some(k) = cheri_pointer_like(tcx, fty, depth + 1, seen) {
+                    return Some(k);
+                }
+            }
+            None
+        }
+        ty::Tuple(tys) => tys.iter().find_map(|t| cheri_pointer_like(tcx, t, depth + 1, seen)),
+        ty::Array(t, _) | ty::Slice(t) | ty::Pat(t, _) => cheri_pointer_like(tcx, t, depth + 1, seen),
+        ty::Closure(_, args) => args
+            .as_closure()
+            .upvar_tys()
+            .iter()
+            .find_map(|t| cheri_pointer_like(tcx, t, depth + 1, seen)),
+        ty::Param(_) | ty::Alias(..) => Some("generic type (may be a pointer)"),
+        ty::Dynamic(..) => Some("trait object"),
+        _ => None,
     }
 }

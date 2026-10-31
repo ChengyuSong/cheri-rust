@@ -194,6 +194,8 @@ attribute_parsers!(
         Combine<RustcAllowConstFnUnstableParser>,
         Combine<RustcCleanParser>,
         Combine<RustcDumpLayoutParser>,
+        Combine<RustcMemContractParser>,
+        Combine<RustcMemContractSiteParser>,
         Combine<RustcMirParser>,
         Combine<RustcThenThisWouldNeedParser>,
         Combine<TargetFeatureParser>,

@@ -595,6 +595,60 @@ impl NoArgsAttributeParser for RustcOffloadKernelParser {
     const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcOffloadKernel;
 }
 
+/// CHERI M3.2 (local prototype, LLM-generated): `#[rustc_mem_contract = "..."]`.
+pub(crate) struct RustcMemContractParser;
+
+impl CombineAttributeParser for RustcMemContractParser {
+    const PATH: &[Symbol] = &[sym::rustc_mem_contract];
+
+    type Item = Symbol;
+
+    const CONVERT: ConvertFn<Self::Item> = |items, _| AttributeKind::RustcMemContract(items);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[
+        Allow(Target::Fn),
+        Allow(Target::ForeignFn),
+        Allow(Target::Method(MethodKind::Inherent)),
+        Allow(Target::Method(MethodKind::TraitImpl)),
+        Allow(Target::Method(MethodKind::Trait { body: true })),
+    ]);
+    const TEMPLATE: AttributeTemplate = template!(NameValueStr: "slice(0,1);ref(ret)");
+    const STABILITY: AttributeStability = unstable!(rustc_attrs);
+
+    fn extend(
+        cx: &mut AcceptContext<'_, '_>,
+        args: &ArgParser,
+    ) -> impl IntoIterator<Item = Self::Item> {
+        let nv = cx.expect_name_value(args, cx.attr_span, None)?;
+        cx.expect_string_literal(nv)
+    }
+}
+
+
+/// CHERI M3.5: `#[rustc_mem_contract_site = "..."]` on a block or statement.
+pub(crate) struct RustcMemContractSiteParser;
+
+impl CombineAttributeParser for RustcMemContractSiteParser {
+    const PATH: &[Symbol] = &[sym::rustc_mem_contract_site];
+
+    type Item = Symbol;
+
+    const CONVERT: ConvertFn<Self::Item> = |items, _| AttributeKind::RustcMemContractSite(items);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[
+        Allow(Target::Expression),
+        Allow(Target::Statement),
+    ]);
+    const TEMPLATE: AttributeTemplate = template!(NameValueStr: "slice(p,n)");
+    const STABILITY: AttributeStability = unstable!(rustc_attrs);
+
+    fn extend(
+        cx: &mut AcceptContext<'_, '_>,
+        args: &ArgParser,
+    ) -> impl IntoIterator<Item = Self::Item> {
+        let nv = cx.expect_name_value(args, cx.attr_span, None)?;
+        cx.expect_string_literal(nv)
+    }
+}
+
 pub(crate) struct RustcMirParser;
 
 impl CombineAttributeParser for RustcMirParser {

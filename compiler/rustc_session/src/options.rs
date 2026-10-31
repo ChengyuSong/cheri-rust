@@ -2438,9 +2438,43 @@ options! {
         parse_cheri_cap_bounds_checks,
         [TRACKED],
         "on CHERI purecap targets, narrow capabilities where Rust checks bounds \
-         (`off` (default), `narrow`, or `elide`). \
-         `narrow` and `elide` are accepted but do not change codegen yet"
+         (`off` (default), `narrow`, or `elide`). With `narrow`, narrows the M2 annotations \
+         prove redundant (retained check + allocation-bounded base) are removed by LLVM's \
+         CheriSkipNarrow by default (allocation-level threat model); \
+         `-Cllvm-args=-cheri-skip-narrow=false` keeps every narrow (stronger mode)"
     ),
+    cheri_alloc_trusted_slices: bool = (true, parse_bool, [TRACKED],
+        "CHERI M2: treat slices minted inside liballoc from `Vec<T, Global>` / `Box<[T], Global>` \
+         (pointer allocation-bounded by liballoc, `len <= cap`) as `mem.alloc_inbounds` \
+         (default: yes)"),
+    cheri_contract_def_facts: bool = (false, parse_bool, [TRACKED],
+        "CHERI M3.2: also lower raw-pointer type contracts (`requires(valid_*)`, \
+         `mem_contract`) on function definitions to the full C-mirror IR facts, including \
+         `mem.alloc_inbounds` (unsound until M3.3 enforces the spatial part at entry; \
+         default: no, definitions only get `mem.range` and the canonical record)"),
+    cheri_export_entry_bounds: bool = (true, parse_bool, [TRACKED],
+        "CHERI M3.0: in functions with a non-Rust ABI (callable from C), do not trust \
+         safe-pointer parameters as `mem.alloc_inbounds`; instead narrow `&T`/`&mut T`/`&[T]`/\
+         `&str` parameters once at entry to the referent (default: yes)"),
+    cheri_contract_narrow: bool = (true, parse_bool, [TRACKED],
+        "CHERI M3.3: at raw-to-typed conversion points (`slice::from_raw_parts`, `&*p`, \
+         `Box::from_raw`, `CStr::from_ptr`, `ptr::read`/`write`/`copy`/`write_bytes`), C \
+         return values, contracted extern arguments and contracted definitions' entries, \
+         narrow the capability once to the type contract's extent unless provenance \
+         discharges it (default: yes)"),
+    cheri_union_census: bool = (false, parse_bool, [UNTRACKED],
+        "CHERI M4.0: print one `CHERI-UNION-CENSUS` line to stderr for every read of a \
+         pointer-carrying union field, including exempt crates and `MaybeUninit` (research)"),
+    cheri_contract_runtime_checks: bool = (false, parse_bool, [TRACKED],
+        "CHERI M3.4: at conversion-narrow sites, assert the capability stays tagged          (out-of-bounds claimed length clears the tag); debug/CI only, default no"),
+    cheri_check_census: bool = (false, parse_bool, [UNTRACKED],
+        "CHERI M5 measurement: print every software check site (MIR `Assert` terminators and \
+         diverging calls) of each codegened instance to stderr, with its source location and \
+         the cap-bounds site classification (default: no)"),
+    cheri_elide_upper_bound: bool = (false, parse_bool, [TRACKED],
+        "CHERI M5 measurement only: with `-Zcheri-cap-bounds-checks=elide`, also remove the \
+         software check at `Dynamic` sites (exact narrow, no tag test) and `Never` sites \
+         (rounded narrow). Upper-bound experiment, not a safe mode (default: no)"),
     cheri_drop_bounds_checks: bool = (false, parse_bool, [TRACKED],
         "measurement-only: drop MIR `Assert(BoundsCheck)` with no capability narrowing \
          (unsound; CHERI purecap targets only) (default: no)"),

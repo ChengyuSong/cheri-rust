@@ -807,7 +807,10 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
 
             // Capability metadata is not modeled in the interpreter. On CHERI targets
             // codegen emits the LLVM intrinsic; here the pointer is returned unchanged.
-            sym::cheri_bounds_narrow | sym::cheri_bounds_narrow_exact | sym::cheri_invalidate => {
+            sym::cheri_bounds_narrow
+            | sym::cheri_bounds_narrow_exact
+            | sym::cheri_contract_narrow
+            | sym::cheri_invalidate => {
                 self.copy_op(&args[0], dest)?;
             }
 

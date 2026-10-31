@@ -12,6 +12,8 @@
 #![feature(staged_api)]
 #![feature(rustc_attrs)]
 #![allow(internal_features)]
+#![allow(unknown_lints, mem_contract_undischarged)] // CHERI M3.5: warn-by-default; stdlib silenced
+
 
 #[cfg(target_os = "android")]
 mod android;

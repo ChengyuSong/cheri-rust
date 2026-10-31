@@ -77,6 +77,13 @@
 #![allow(incomplete_features)]
 #![warn(multiple_supertrait_upcastable)]
 #![allow(internal_features)]
+// CHERI M3.5: `mem_contract_undischarged` is warn-by-default for user code.
+// Stdlib migration is incremental; the 11 contracted raw APIs already carry
+// `#[mem_contract]` covering their own bodies. Crate-allow here until sites
+// are annotated with block/fn `requires`. Noise at first enable: core≈478,
+// alloc≈234 (mostly `&*raw` and `ptr::{copy,read,write}`).
+#![allow(unknown_lints, mem_contract_undischarged)]
+
 #![allow(unused_features)]
 #![deny(ffi_unwind_calls)]
 #![warn(unreachable_pub)]
@@ -94,6 +101,7 @@
 #![feature(const_destruct)]
 #![feature(const_eval_select)]
 #![feature(const_select_unpredictable)]
+#![feature(contracts)]
 #![feature(core_intrinsics)]
 #![feature(coverage_attribute)]
 #![feature(disjoint_bitor)]

@@ -27,6 +27,8 @@
 #![cfg_attr(test, feature(test))]
 #![feature(thread_spawn_hook)]
 #![allow(internal_features)]
+#![allow(unknown_lints, mem_contract_undischarged)] // CHERI M3.5: warn-by-default; stdlib silenced
+
 #![warn(rustdoc::unescaped_backticks)]
 #![warn(unreachable_pub)]
 

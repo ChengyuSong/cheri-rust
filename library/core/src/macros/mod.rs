@@ -1848,15 +1848,37 @@ pub(crate) mod builtin {
         /* compiler built-in */
     }
 
-    /// Attribute macro applied to a function to give it a precondition.
+    /// Attribute macro applied to a function **or** a block/statement to give
+    /// it a precondition.
     ///
-    /// The attribute carries an argument token-tree which is
-    /// eventually parsed as an boolean expression with access to the
-    /// function's formal parameters
+    /// Function form (M3.2): `#[requires(valid_slice::<T>(p, n))] fn ...`
+    /// Block/statement form (M3.5): requires
+/// `#![feature(stmt_expr_attributes, proc_macro_hygiene)]`:
+    /// ```ignore
+    /// #[core::contracts::requires(valid_slice::<u8>(p, n))]
+    /// {
+    ///     let s = unsafe { core::slice::from_raw_parts(p, n) };
+    /// }
+    /// ```
     #[unstable(feature = "contracts", issue = "128044")]
-    #[allow_internal_unstable(contracts_internals)]
+    // CHERI: `rustc_attrs` for injected contract attrs; `stmt_expr_attributes`
+    // so the attribute may attach to blocks/lets.
+    #[allow_internal_unstable(contracts_internals, rustc_attrs, stmt_expr_attributes)]
     #[rustc_builtin_macro]
-    pub macro contracts_requires($item:item) {
+    pub macro contracts_requires {
+        ($item:item) => { /* compiler built-in */ },
+        ($stmt:stmt) => { /* compiler built-in */ },
+        ($expr:expr) => { /* compiler built-in */ },
+    }
+
+    /// CHERI M3.2 (local research prototype, LLM-generated): type contracts on any
+    /// function, including foreign declarations, which `requires` cannot annotate:
+    /// `#[mem_contract(requires(valid_slice::<u8>(p, n)), ret = valid_ref::<u8>(ret),
+    /// keep(p), ret_borrows(p))]`. Lowered to IR facts only (no runtime check).
+    #[unstable(feature = "contracts", issue = "128044")]
+    #[allow_internal_unstable(rustc_attrs)]
+    #[rustc_builtin_macro]
+    pub macro contracts_mem_contract($item:item) {
         /* compiler built-in */
     }
 

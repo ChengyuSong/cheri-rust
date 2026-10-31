@@ -1264,6 +1264,14 @@ pub enum AttributeKind {
     /// Represents `#[rustc_diagnostic_item]`
     RustcDiagnosticItem(Symbol),
 
+    /// CHERI M3.2 (local prototype, LLM-generated): `#[rustc_mem_contract = "..."]`,
+    /// injected by `core::contracts::{requires, mem_contract}`. Each entry is a
+    /// canonical type-contract list over Rust parameter indices, e.g.
+    /// `"slice(0,1);ref(ret);ret_borrows(0)"`; lowered to IR facts in codegen.
+    RustcMemContract(ThinVec<Symbol>),
+    /// CHERI M3.5: block/statement-level type contract site.
+    RustcMemContractSite(ThinVec<Symbol>),
+
     /// Represents `#[rustc_do_not_const_check]`
     RustcDoNotConstCheck,
 

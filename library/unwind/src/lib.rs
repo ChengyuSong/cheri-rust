@@ -7,6 +7,8 @@
     feature(link_llvm_intrinsics, simd_wasm64, asm_experimental_arch)
 )]
 #![allow(internal_features)]
+#![allow(unknown_lints, mem_contract_undischarged)] // CHERI M3.5: warn-by-default; stdlib silenced
+
 #![allow(unused_features)]
 #![deny(unsafe_op_in_unsafe_fn)]
 

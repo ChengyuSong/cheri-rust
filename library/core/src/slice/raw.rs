@@ -121,6 +121,8 @@ use crate::{array, ptr, ub_checks};
 #[must_use]
 #[rustc_diagnostic_item = "slice_from_raw_parts"]
 #[track_caller]
+// CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+#[crate::contracts::mem_contract(requires(valid_slice::<T>(data, len)))]
 pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
     // SAFETY: the caller must uphold the safety contract for `from_raw_parts`.
     unsafe {
@@ -135,6 +137,12 @@ pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T]
             ) =>
             ub_checks::maybe_is_aligned_and_not_null(data, align, false)
                 && ub_checks::is_valid_allocation_size(size, len)
+        );
+        // CHERI M3.3: establish the type contract's spatial extent at this conversion
+        // (or discharge it when provenance already proves the bound).
+        let data = crate::intrinsics::cheri_contract_narrow(
+            data,
+            len.saturating_mul(crate::mem::size_of::<T>()),
         );
         &*ptr::slice_from_raw_parts(data, len)
     }
@@ -176,6 +184,8 @@ pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T]
 #[must_use]
 #[rustc_diagnostic_item = "slice_from_raw_parts_mut"]
 #[track_caller]
+// CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+#[crate::contracts::mem_contract(requires(valid_slice_mut::<T>(data, len)))]
 pub const unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {
     // SAFETY: the caller must uphold the safety contract for `from_raw_parts_mut`.
     unsafe {
@@ -191,6 +201,10 @@ pub const unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a m
             ub_checks::maybe_is_aligned_and_not_null(data, align, false)
                 && ub_checks::is_valid_allocation_size(size, len)
         );
+        let data = crate::intrinsics::cheri_contract_narrow(
+            data,
+            len.saturating_mul(crate::mem::size_of::<T>()),
+        ) as *mut T;
         &mut *ptr::slice_from_raw_parts_mut(data, len)
     }
 }

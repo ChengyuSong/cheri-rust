@@ -349,6 +349,8 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             AttributeKind::RustcDenyExplicitImpl => (),
             AttributeKind::RustcDeprecatedSafe2024 { .. } => (),
             AttributeKind::RustcDiagnosticItem(..) => (),
+            AttributeKind::RustcMemContract(..) => (),
+            AttributeKind::RustcMemContractSite(..) => (),
             AttributeKind::RustcDoNotConstCheck => (),
             AttributeKind::RustcDocPrimitive(..) => (),
             AttributeKind::RustcDummy => (),

@@ -153,4 +153,7 @@ pub fn register_builtin_macros(resolver: &mut dyn ResolverExpand) {
     register(sym::contracts_requires, requires);
     let ensures = SyntaxExtensionKind::Attr(Arc::new(contracts::ExpandEnsures));
     register(sym::contracts_ensures, ensures);
+    // CHERI M3.2 (local prototype): fallback type-contract attribute (also on extern decls).
+    let mem_contract = SyntaxExtensionKind::Attr(Arc::new(contracts::ExpandMemContract));
+    register(sym::contracts_mem_contract, mem_contract);
 }

@@ -1208,6 +1208,34 @@ impl String {
         self.vec.capacity()
     }
 
+    /// Returns a raw pointer to the [`String`]'s buffer (the allocation).
+    ///
+    /// Shadows the [`str::as_ptr`] method reached via [`Deref`] so a CHERI
+    /// conversion-narrow of the logical `&str` slice does not hide the
+    /// allocation capability. Equivalent to `as_mut_vec().as_ptr()` without
+    /// requiring mutability.
+    ///
+    /// CHERI M3.4 [LLM-generated].
+    #[inline]
+    #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
+    pub const fn as_ptr(&self) -> *const u8 {
+        self.vec.as_ptr()
+    }
+
+    /// Returns an unsafe mutable pointer to the [`String`]'s buffer (the allocation).
+    ///
+    /// Shadows the `str` method reached via [`DerefMut`] for the same reason as
+    /// [`as_ptr`].
+    ///
+    /// CHERI M3.4 [LLM-generated].
+    #[inline]
+    #[stable(feature = "string_as_mut_ptr", since = "1.36.0")]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.vec.as_mut_ptr()
+    }
+
+
     /// Reserves capacity for at least `additional` bytes more than the
     /// current length. The allocator may reserve more space to speculatively
     /// avoid frequent allocations. After calling `reserve`,
