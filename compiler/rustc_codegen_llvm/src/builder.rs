@@ -996,6 +996,9 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     }
 
     fn mem_claim(&mut self, ptr: &'ll Value, bytes: &'ll Value, flags: u64) -> &'ll Value {
+        if mem_off("claim") || mem_off(&format!("claim:{}", flags & 0xff)) {
+            return ptr;
+        }
         let i64t = self.type_i64();
         let bytes = if self.val_ty(bytes) == i64t { bytes } else { self.intcast(bytes, i64t, false) };
         let flags = self.cx.const_u64(flags);
@@ -1003,6 +1006,9 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     }
 
     fn mem_fact(&mut self, tag: &'static str, ops: &[&'ll Value]) {
+        if mem_off("fact") {
+            return;
+        }
         let (ty, f) = self.cx.get_intrinsic("llvm.mem.fact".into(), &[]);
         let bundle = llvm::OperandBundleBox::new(tag, ops);
         let bundles = [bundle.as_ref()];
@@ -1021,6 +1027,9 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     }
 
     fn set_next_call_mem_bundle(&mut self, tag: &'static str, ops: &[&'ll Value]) {
+        if mem_off(tag) {
+            return;
+        }
         *self.cx.mem_pending_bundle.borrow_mut() = Some((tag, ops.to_vec()));
     }
 
@@ -1029,7 +1038,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     }
 
     fn mem_guard(&mut self, inst: &'ll Value, site: u64) {
-        if unsafe { llvm::LLVMIsAInstruction(inst) }.is_none() {
+        if mem_off("guard") || unsafe { llvm::LLVMIsAInstruction(inst) }.is_none() {
             return;
         }
         let k = self.cx.get_md_kind_id("mem.guard");
@@ -1038,7 +1047,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     }
 
     fn mem_last_use(&mut self, inst: &'ll Value, loans: &[u64]) {
-        if loans.is_empty() || unsafe { llvm::LLVMIsAInstruction(inst) }.is_none() {
+        if loans.is_empty() || mem_off("last_use") || unsafe { llvm::LLVMIsAInstruction(inst) }.is_none() {
             return;
         }
         let k = self.cx.get_md_kind_id("mem.last_use");
@@ -2387,4 +2396,18 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
     ) {
         self.call_intrinsic("llvm.instrprof.increment", &[], &[fn_name, hash, num_counters, index]);
     }
+}
+
+/// [LLM-generated] M5r R1 research knob (untracked, attribution only): `MEM_ANNOT_OFF` is a
+/// comma list of marker kinds not to emit: `claim`, `claim:<kind>`, `fact`, `mem.check`,
+/// `mem.free`, `guard`, `last_use`.
+fn mem_off(kind: &str) -> bool {
+    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| {
+        std::env::var("MEM_ANNOT_OFF")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default()
+    })
+    .iter()
+    .any(|k| k == kind)
 }

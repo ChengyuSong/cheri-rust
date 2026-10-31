@@ -581,13 +581,12 @@ pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: us
 /// CHERI M3.3: narrow `p` to `count` elements of `T` at a conversion / raw-op site.
 #[inline(always)]
 const unsafe fn cheri_narrow_elems<T>(p: *const T, count: usize) -> *const T {
-    let bytes = count.saturating_mul(crate::mem::size_of::<T>());
-    if bytes == 0 {
-        p
-    } else {
-        // SAFETY: intrinsic is an identity off CHERI / when discharged.
-        unsafe { crate::intrinsics::cheri_contract_narrow(p, bytes) }
-    }
+    // M5r R1: branch-free so the claim's length does not shape the CFG. The caller's
+    // contract (valid for `count` elements) bounds the size; a 0-byte claim only says
+    // "valid for 0 bytes".
+    let bytes = count.wrapping_mul(crate::mem::size_of::<T>());
+    // SAFETY: intrinsic is an identity off CHERI; a claim is pure information.
+    unsafe { crate::intrinsics::cheri_contract_narrow(p, bytes) }
 }
 
 
