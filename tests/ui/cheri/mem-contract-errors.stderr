@@ -1,0 +1,38 @@
+error: invalid `mem_contract`: `valid_slice` takes 2 argument(s)
+  --> $DIR/mem-contract-errors.rs:9:5
+   |
+LL |     #[mem_contract(requires(valid_slice::<u8>(p)))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `mem_contract`: `valid_ref`: `q` is not a parameter of this function
+  --> $DIR/mem-contract-errors.rs:12:5
+   |
+LL |     #[mem_contract(requires(valid_ref::<u8>(q)))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `mem_contract`: `ret = valid_ref(...)`: the first argument must be `ret`
+  --> $DIR/mem-contract-errors.rs:15:5
+   |
+LL |     #[mem_contract(ret = valid_ref::<u8>(p))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `mem_contract`: `z` is not a parameter of this function
+  --> $DIR/mem-contract-errors.rs:18:5
+   |
+LL |     #[mem_contract(keep(z))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `mem_contract`: expected `requires(...)`, `ret = ...`, `keep(x)` or `ret_borrows(x)`
+  --> $DIR/mem-contract-errors.rs:21:5
+   |
+LL |     #[mem_contract(frobnicate(p))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `mem_contract` can only be used on functions
+  --> $DIR/mem-contract-errors.rs:26:1
+   |
+LL | #[mem_contract(requires(valid_ref::<u8>(p)))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 6 previous errors
+

@@ -1,0 +1,43 @@
+warning: unsafe raw→typed conversion `slice::from_raw_parts` without a covering `requires` / `mem_contract`
+  --> $DIR/mem-contract-undischarged.rs:12:5
+   |
+LL |     core::slice::from_raw_parts(p, n)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: add `#[core::contracts::requires(valid_*(...))]` on the enclosing function or block, matching this conversion's target type
+   = note: `#[warn(mem_contract_undischarged)]` on by default
+
+warning: unsafe raw→typed conversion `&*raw / &mut *raw` without a covering `requires` / `mem_contract`
+  --> $DIR/mem-contract-undischarged.rs:17:5
+   |
+LL |     &*p
+   |     ^^^
+   |
+   = note: add `#[core::contracts::requires(valid_*(...))]` on the enclosing function or block, matching this conversion's target type
+
+warning: unsafe raw→typed conversion `slice::from_raw_parts` without a covering `requires` / `mem_contract`
+  --> $DIR/mem-contract-undischarged.rs:38:5
+   |
+LL |     core::slice::from_raw_parts(p, n)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: add `#[core::contracts::requires(valid_*(...))]` on the enclosing function or block, matching this conversion's target type
+
+warning: unsafe raw→typed conversion `mem::transmute(raw→typed)` without a covering `requires` / `mem_contract`
+  --> $DIR/mem-contract-undischarged.rs:50:5
+   |
+LL |     core::mem::transmute(raw)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: add `#[core::contracts::requires(valid_*(...))]` on the enclosing function or block, matching this conversion's target type
+
+warning: unsafe raw→typed conversion `ptr/NonNull::as_ref/as_mut` without a covering `requires` / `mem_contract`
+  --> $DIR/mem-contract-undischarged.rs:61:5
+   |
+LL |     p.as_ref()
+   |     ^^^^^^^^^^
+   |
+   = note: add `#[core::contracts::requires(valid_*(...))]` on the enclosing function or block, matching this conversion's target type
+
+warning: 5 warnings emitted
+

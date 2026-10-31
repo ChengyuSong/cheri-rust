@@ -1,0 +1,98 @@
+error: reading union field of type `&[u64]` from `PunSlice`: it contains a slice reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:27:30
+   |
+LL |     let s: &[u64] = unsafe { u.typed };
+   |                              ^^^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `&[u64]` from `PunSlice`: it contains a slice reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:33:14
+   |
+LL |     unsafe { u.typed }
+   |              ^^^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `*const [u64]` from `PunSlice`: it contains a raw pointer; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:36:14
+   |
+LL |     unsafe { u.raw }
+   |              ^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `&[u64]` from `PunSlice`: it contains a slice reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:39:14
+   |
+LL |     unsafe { w.u.typed.len() }
+   |              ^^^^^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `&[u64]` from `PunSlice`: it contains a slice reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:42:20
+   |
+LL |     let PunSlice { typed } = u;
+   |                    ^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `&[u64]` from `PunSlice`: it contains a slice reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:47:27
+   |
+LL |         PunSlice { typed: s } => s.len(),
+   |                           ^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `(usize, &'static u8)` from `Agg`: it contains a reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:51:15
+   |
+LL |     unsafe { *u.pair.1 }
+   |               ^^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `(usize, &'static u8)` from `Agg`: it contains a reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:54:14
+   |
+LL |     unsafe { u.pair.0 }
+   |              ^^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `fn() -> u32` from `FnU`: it contains a fn pointer; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:57:14
+   |
+LL |     unsafe { (u.f)() }
+   |              ^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `NonNull<u8>` from `NnU`: it contains a NonNull; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:60:14
+   |
+LL |     unsafe { u.nn }
+   |              ^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `&[u64]` from `PunSlice`: it contains a slice reference; pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:63:23
+   |
+LL |     let r = unsafe { &u.typed };
+   |                       ^^^^^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: reading union field of type `T` from `G`: it contains a generic type (may be a pointer); pointer type punning through unions is not allowed in CHERI-contracted code
+  --> $DIR/union-pointer-read.rs:67:14
+   |
+LL |     unsafe { g.t }
+   |              ^^^ pointer-carrying union field read
+   |
+   = note: safe interfaces must expect one specific type; for a C/C++ tagged union use a typed accessor (e.g. `Foo *get_foo(u *x)` with `RS_CHECKS_TAG`) declared as an extern with a `valid_ref` contract
+
+error: aborting due to 12 previous errors
+
