@@ -1313,6 +1313,22 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 self.mem_stats.last_use_stmts += 1;
             } else {
                 self.mem_stats.last_use_stmts_missed += 1;
+                if std::env::var_os("MEM_ANNOT_DEBUG").is_some() {
+                    let kind = match &self.locals[local] {
+                        LocalRef::Operand(op) => format!("operand {:?}", op.val),
+                        LocalRef::Place(_) => "place".to_string(),
+                        LocalRef::UnsizedPlace(_) => "unsized".to_string(),
+                        LocalRef::PendingOperand => "pending".to_string(),
+                    };
+                    rustc_middle::ty::print::with_no_trimmed_paths!(eprintln!(
+                        "MEM-LU-MISS {} {:?} {:?}[{}]: {:?} ({kind})",
+                        self.cx.tcx().symbol_name(self.instance).name,
+                        local,
+                        bb,
+                        k,
+                        self.mir[bb].statements[k]
+                    ));
+                }
             }
         }
     }

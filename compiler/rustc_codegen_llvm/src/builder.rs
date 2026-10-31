@@ -1077,26 +1077,30 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                         .map(|f| llvm::get_value_name(f).starts_with(b"llvm.mem.claim"))
                         .unwrap_or(false)
             };
-            let strip = |mut v: &'ll Value| -> &'ll Value {
+            // Whether `v` is `ptr` or derived from it through GEPs / claims.
+            let derives = |mut v: &'ll Value| -> bool {
                 for _ in 0..16 {
+                    if std::ptr::eq(v, ptr) {
+                        return true;
+                    }
                     if llvm::LLVMIsAGetElementPtrInst(v).is_some() || is_claim(v) {
                         v = llvm::LLVMGetOperand(v, 0).unwrap();
                         continue;
                     }
                     break;
                 }
-                v
+                false
             };
             let mut last = None;
             while let Some(i) = cur {
                 let uses = if llvm::LLVMIsALoadInst(i).is_some() {
-                    std::ptr::eq(strip(llvm::LLVMGetOperand(i, 0).unwrap()), ptr)
+                    derives(llvm::LLVMGetOperand(i, 0).unwrap())
                 } else if llvm::LLVMIsAStoreInst(i).is_some() {
-                    std::ptr::eq(strip(llvm::LLVMGetOperand(i, 1).unwrap()), ptr)
+                    derives(llvm::LLVMGetOperand(i, 1).unwrap())
                 } else if llvm::LLVMIsACallInst(i).is_some() && !is_claim(i) {
                     let n = llvm::LLVMGetNumArgOperands(i);
                     (0..n).any(|a| {
-                        llvm::LLVMGetOperand(i, a).map(|o| std::ptr::eq(strip(o), ptr)).unwrap_or(false)
+                        llvm::LLVMGetOperand(i, a).map(|o| derives(o)).unwrap_or(false)
                     })
                 } else {
                     false
