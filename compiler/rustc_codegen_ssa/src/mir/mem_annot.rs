@@ -232,8 +232,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// C with a capability wider than the referent, so each `&T`/`&mut T`/`&[T]`/`&str`/
     /// `Box<T>`/`Option<&T>`/`Option<Box<T>>` parameter gets an untrusted entry claim
     /// (`CK_Param | CF_Untrusted [| CF_Nullable]`). The late pass decides whether to narrow.
-    /// R1 limitation: only SSA (operand) parameters; a parameter living in memory would
-    /// need a reload/store-back, which changes codegen even after the claim is stripped.
+    /// R2: a parameter living in memory is reloaded, claimed and stored back.
     pub(super) fn mem_export_entry_claims(
         &mut self,
         bx: &mut Bx,
@@ -265,12 +264,31 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
                 _ => continue,
             };
-            let LocalRef::Operand(op) = lref else { continue };
-            let Some((bytes, kind)) = self.mem_claim_bytes(bx, pointee, op.val) else { continue };
-            let _ = kind;
             let flags = CK_PARAM | CF_UNTRUSTED | if nullable { CF_NULLABLE } else { 0 };
-            let v = self.mem_claim_val(bx, op.val, bytes, flags);
-            *op = OperandRef { val: v, layout: op.layout, move_annotation: None };
+            match lref {
+                LocalRef::Operand(op) => {
+                    let Some((bytes, _)) = self.mem_claim_bytes(bx, pointee, op.val) else {
+                        continue;
+                    };
+                    let v = self.mem_claim_val(bx, op.val, bytes, flags);
+                    *op = OperandRef { val: v, layout: op.layout, move_annotation: None };
+                }
+                // M5r R2 [LLM-generated]: a parameter living in memory (passed indirectly,
+                // or address-taken): reload, claim, store back. With the claim stripped the
+                // store of the reloaded value is a no-op that EarlyCSE/DSE remove.
+                LocalRef::Place(place) if place.layout.is_sized() => {
+                    let place = *place;
+                    let op = bx.load_operand(place);
+                    let Some((bytes, _)) = self.mem_claim_bytes(bx, pointee, op.val) else {
+                        continue;
+                    };
+                    let v = self.mem_claim_val(bx, op.val, bytes, flags);
+                    OperandRef { val: v, layout: op.layout, move_annotation: None }
+                        .val
+                        .store(bx, place);
+                }
+                _ => continue,
+            }
         }
     }
 
