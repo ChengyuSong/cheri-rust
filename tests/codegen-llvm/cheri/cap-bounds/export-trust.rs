@@ -7,6 +7,8 @@
 //
 //@ revisions: off skip noskip nofix
 //@ compile-flags: -Copt-level=2
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ [skip] compile-flags: -Zcheri-cap-bounds-checks=narrow
 //@ [noskip] compile-flags: -Zcheri-cap-bounds-checks=narrow -Cllvm-args=-cheri-skip-narrow=false
 //@ [nofix] compile-flags: -Zcheri-cap-bounds-checks=narrow -Zcheri-export-entry-bounds=no

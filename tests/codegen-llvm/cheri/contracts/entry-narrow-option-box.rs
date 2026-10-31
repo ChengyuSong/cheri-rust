@@ -4,6 +4,8 @@
 // "mem.alloc_inbounds". Rust-ABI functions keep the trust.
 //
 //@ compile-flags: -Copt-level=2 -Zcheri-cap-bounds-checks=narrow
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]
@@ -27,8 +29,10 @@ pub extern "C" fn c_box(b: Box<[u64; 4]>) -> u64 {
 // CHECK-NOT: "mem.alloc_inbounds"
 // CHECK-SAME: dereferenceable_or_null(32) [[X:%[0-9a-z._]+]])
 // The null-preserving narrow (the speculatable bounds.set may be hoisted above the test).
-// CHECK-DAG: @llvm.cheri.cap.bounds.set.i64(ptr addrspace(200) [[X]], i64 32)
-// CHECK-DAG: icmp eq ptr addrspace(200) [[X]], null
+// M5r R3 (D23): the late pass narrows first; the null test then reads the narrowed value
+// (capability compare is by address, so null stays null).
+// CHECK: [[N:%[0-9a-z._]+]] = {{.*}}@llvm.cheri.cap.bounds.set.i64(ptr addrspace(200) [[X]], i64 32)
+// CHECK: icmp eq ptr addrspace(200) [[N]], null
 #[no_mangle]
 pub extern "C" fn c_opt(x: Option<&[u64; 4]>) -> u64 {
     match x {
@@ -40,8 +44,9 @@ pub extern "C" fn c_opt(x: Option<&[u64; 4]>) -> u64 {
 // CHECK-LABEL: define {{.*}}@c_opt_box(
 // CHECK-NOT: "mem.alloc_inbounds"
 // CHECK-SAME: [[X:%[0-9a-z._]+]])
-// CHECK-DAG: @llvm.cheri.cap.bounds.set.i64(ptr addrspace(200) [[X]], i64 32)
-// CHECK-DAG: icmp eq ptr addrspace(200) [[X]], null
+// M5r R3 (D23): narrowed first, then the null test on the narrowed value.
+// CHECK: [[N:%[0-9a-z._]+]] = {{.*}}@llvm.cheri.cap.bounds.set.i64(ptr addrspace(200) [[X]], i64 32)
+// CHECK: icmp eq ptr addrspace(200) [[N]], null
 #[no_mangle]
 pub extern "C" fn c_opt_box(x: Option<Box<[u64; 4]>>) -> u64 {
     match x {

@@ -5,6 +5,8 @@
 //
 //@ revisions: skip noskip
 //@ compile-flags: -Copt-level=2 -Zcheri-cap-bounds-checks=narrow
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ [noskip] compile-flags: -Cllvm-args=-cheri-skip-narrow=false
 //@ only-riscv64cheri-unknown-none-purecap
 
@@ -61,7 +63,8 @@ unsafe extern "C" {
 // CHECK-LABEL: @acc_from_c(
 // CHECK: [[R:%.*]] = {{.*}}call {{.*}}@c_get_buf_acc(
 // CHECK: [[N:%.*]] = {{.*}}call {{.*}}@llvm.cheri.cap.bounds.set.i64(ptr addrspace(200) [[R]], i64 256){{.*}}!cheri.contract_narrow
-// CHECK: icmp eq ptr addrspace(200) [[R]], null
+// M5r R3 (D23): the null test reads the narrowed value (compare by address).
+// CHECK: icmp eq ptr addrspace(200) [[N]], null
 #[no_mangle]
 pub unsafe extern "C" fn acc_from_c(x: *const u8, i: usize) -> u64 {
     match unsafe { c_get_buf_acc(x) } {

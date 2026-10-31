@@ -7,6 +7,8 @@
 // untrusted and are narrowed at entry (M3.0).
 //
 //@ compile-flags: -Copt-level=2 -Zcheri-cap-bounds-checks=narrow
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]
@@ -48,7 +50,8 @@ unsafe extern "C" {
 }
 
 // A C-callable definition is not trusted: no "mem.alloc_inbounds" on the parameter.
-// CHECK-DAG: define {{.*}}@c_def(ptr {{.*}}captures(address) dereferenceable(4) %{{[0-9a-z]+}})
+// M5r R3 (D23): the entry narrow is placed after attribute inference, so the param may stay captures(none).
+// CHECK-DAG: define {{.*}}@c_def(ptr {{.*}}captures({{(none|address)}}) dereferenceable(4) %{{[0-9a-z]+}})
 #[no_mangle]
 pub extern "C" fn c_def(x: &u32) -> u32 {
     *x

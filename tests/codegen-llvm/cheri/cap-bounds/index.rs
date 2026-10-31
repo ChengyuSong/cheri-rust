@@ -5,6 +5,8 @@
 //
 //@ revisions: off narrow elide
 //@ compile-flags: -Copt-level=2
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ [narrow] compile-flags: -Zcheri-cap-bounds-checks=narrow -Cllvm-args=-cheri-skip-narrow=false
 //@ [elide] compile-flags: -Zcheri-cap-bounds-checks=elide
 //@ only-riscv64cheri-unknown-none-purecap
@@ -40,9 +42,11 @@ pub fn array_small(a: &[u32; 16], i: usize) -> u32 {
 // CHECK-LABEL: @local_array(
 #[no_mangle]
 pub fn local_array(i: usize, x: u64) -> u64 {
-    // elide-NOT: panic_bounds_check
-    // elide: @llvm.cheri.cap.bounds.set.exact.i64({{.*}}, i64 64)
-    // elide-NOT: panic_bounds_check
+    // M5r R3 (D23): GVN merges the `i ^ 1` and `i` checks (same predicate) into one panic
+    // block whose marker no longer names a single site, so the late pass keeps it (a merged
+    // check is never removed). M5.0 narrowed here; see RESULTS-m5r.3.md.
+    // elide: icmp ult i64 %i, 8
+    // elide: panic_bounds_check
     // off: panic_bounds_check
     let mut a = [x; 8];
     a[i ^ 1] = x + 1;
@@ -66,7 +70,7 @@ pub fn slice_load(s: &[u64], i: usize) -> u64 {
     // elide-NOT: icmp
     // elide: [[E:%.*]] = {{.*}}@llvm.cheri.cap.bounds.set.exact.i64(ptr addrspace(200) {{.*}}%s.0,
     // elide-NEXT: [[T:%.*]] = {{.*}}@llvm.cheri.cap.tag.get(ptr addrspace(200) [[E]])
-    // elide-NEXT: br i1 [[T]], label %[[FAST:.*]], label %[[SLOW:cheri_inexact_bounds]]
+    // elide-NEXT: br i1 [[T]], label %[[FAST:.*]], label %[[SLOW:cheri.slowcheck]]
     // elide-NOT: icmp
     // elide: [[FAST]]:
     // elide-NOT: icmp
@@ -104,12 +108,13 @@ pub fn slice_rmw(s: &mut [u32], i: usize) {
 // CHECK-LABEL: @loop_sum(
 #[no_mangle]
 pub fn loop_sum(s: &[u64], n: usize) -> u64 {
+    // M5r R3 (D23): the generic passes hoist the (loop-invariant) check to the preheader,
+    // so the tag test branches to the slow check before the loop.
     // elide: @llvm.cheri.cap.bounds.set.exact.i64(
     // elide: @llvm.cheri.cap.tag.get(
+    // elide: br i1 %{{.*}}, label %{{.*}}, label %cheri.slowcheck
     // elide-NOT: llvm.cheri.cap.bounds.set.exact
-    // elide: [[LOOP:bb[0-9]+]]:
-    // elide-NOT: llvm.cheri.cap.bounds.set.exact
-    // elide: br i1 %{{.*}}, label %{{.*}}, label %cheri_inexact_bounds
+    // elide: cheri.slowcheck:
     let mut t = 0u64;
     for i in 0..n {
         t = t.wrapping_add(s[i]);

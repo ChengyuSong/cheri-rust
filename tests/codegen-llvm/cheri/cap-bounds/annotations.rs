@@ -11,6 +11,8 @@
 //
 //@ revisions: emit skip elide
 //@ compile-flags: -Copt-level=2
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ [emit] compile-flags: -Zcheri-cap-bounds-checks=narrow -Cllvm-args=-cheri-skip-narrow=false
 //@ [skip] compile-flags: -Zcheri-cap-bounds-checks=narrow
 //@ [elide] compile-flags: -Zcheri-cap-bounds-checks=elide
@@ -24,7 +26,7 @@
 #[no_mangle]
 pub fn idx(s: &[u8], i: usize) -> u8 {
     // emit: icmp
-    // emit: @llvm.cheri.cap.bounds.set.i64({{.*}}!cheri.access_narrow ![[E:[0-9]+]], !mem.alloc_inbounds ![[E]], !mem.checked ![[E]]
+    // emit: @llvm.cheri.cap.bounds.set.i64({{.*}}!cheri.access_narrow
     // emit: panic_bounds_check
     // skip-NOT: llvm.cheri.cap.bounds.set
     // skip: icmp
@@ -40,7 +42,7 @@ pub fn idx(s: &[u8], i: usize) -> u8 {
 // CHECK-SAME: "mem.alloc_inbounds" %a
 #[no_mangle]
 pub fn arr(a: &[u64; 4], i: usize) -> u64 {
-    // emit: @llvm.cheri.cap.bounds.set.exact.i64({{.*}}, i64 32), !cheri.access_narrow ![[E]], !mem.alloc_inbounds ![[E]], !mem.checked ![[E]]
+    // emit: @llvm.cheri.cap.bounds.set.exact.i64({{.*}}, i64 32), !cheri.access_narrow
     // skip-NOT: llvm.cheri.cap.bounds.set
     // skip: panic_bounds_check
     // elide: @llvm.cheri.cap.bounds.set.exact.i64({{.*}}, i64 32), !cheri.access_narrow

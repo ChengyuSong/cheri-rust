@@ -4,6 +4,8 @@
 //
 // The M2 skip pass is disabled so the M1 narrows of the checked fallback stay visible.
 //@ compile-flags: -Copt-level=2 -Zcheri-cap-bounds-checks=elide -Cllvm-args=-cheri-skip-narrow=false
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]
@@ -41,7 +43,7 @@ pub fn len_4097(a: &[u8; 4097], i: usize) -> u8 {
 pub fn len_4096_align1(a: &[u8; 4096], i: usize) -> u8 {
     // CHECK: @llvm.cheri.cap.bounds.set.exact.i64({{.*}}, i64 4096)
     // CHECK: @llvm.cheri.cap.tag.get(
-    // CHECK: cheri_inexact_bounds:
+    // CHECK: cheri.slowcheck:
     // CHECK: panic_bounds_check
     a[i]
 }

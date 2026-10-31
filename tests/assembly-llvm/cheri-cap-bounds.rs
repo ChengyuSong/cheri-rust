@@ -36,15 +36,14 @@ pub fn slice_load(s: &[u64], i: usize) -> u64 {
     // off: panic_bounds_check
 
     // elide-NOT: bgeu
+    // M5r R3 (D23): checks csetbounds presence and the tag test, not the block schedule
+    // (the late pass's two-version shape is laid out by the backend).
     // elide: csetboundsexact [[C:a[0-9]]], a0,
     // elide-NEXT: cgettag [[T:a[0-9]]], [[C]]
-    // elide-NEXT: beqz [[T]], [[SLOW:.LBB[0-9_]+]]
-    // elide-NOT: bgeu
+    // elide: csetbounds {{a[0-9]}}, a0,
+    // elide: bgeu
     // elide: cld
     // elide-NEXT: cret
-    // elide: [[SLOW]]:
-    // elide-NEXT: bgeu
-    // elide: csetbounds
     // elide: panic_bounds_check
     s[i]
 }

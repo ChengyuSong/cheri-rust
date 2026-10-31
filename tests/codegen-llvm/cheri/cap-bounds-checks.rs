@@ -5,6 +5,8 @@
 //
 //@ revisions: off narrow elide drop
 //@ compile-flags: -Copt-level=1
+// M5r R3 (D23): CHECKs below see the late CHERI pass decisions [LLM-generated].
+//@ compile-flags: -Cllvm-args=-cheri-bounds-lowering-in-opt
 //@ [narrow] compile-flags: -Zcheri-cap-bounds-checks=narrow -Cllvm-args=-cheri-skip-narrow=false
 //@ [elide] compile-flags: -Zcheri-cap-bounds-checks=elide
 //@ [drop] compile-flags: -Zcheri-drop-bounds-checks
@@ -24,7 +26,7 @@ pub fn idx(s: &[u8], i: usize) -> u8 {
     // narrow: panic_bounds_check
     // elide: @llvm.cheri.cap.bounds.set.exact.i64(
     // elide: @llvm.cheri.cap.tag.get(
-    // elide: cheri_inexact_bounds:
+    // elide: cheri.slowcheck:
     // elide: icmp
     // elide: panic_bounds_check
     // drop-NOT: llvm.cheri
