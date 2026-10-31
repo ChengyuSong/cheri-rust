@@ -2442,8 +2442,8 @@ options! {
          prove redundant (retained check + allocation-bounded base) are removed by LLVM's \
          CheriSkipNarrow by default (allocation-level threat model); \
          `-Cllvm-args=-cheri-skip-narrow=false` keeps every narrow (stronger mode). \
-         M5r R1: accepted for compatibility but has no effect (rustc only emits markers; \
-         the policy moves to the late LLVM pass in R2)"
+         M5r R2: rustc passes the policy as the `cheri.bounds-policy` module flag and the \
+         late LLVM pass (CheriBoundsLowering) decides per check"
     ),
     cheri_annotate: bool = (true, parse_bool, [TRACKED],
         "CHERI M5r: emit the target-neutral memory annotations (`\"mem.check\"` markers, \

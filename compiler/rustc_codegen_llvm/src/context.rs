@@ -298,6 +298,28 @@ pub(crate) unsafe fn create_module<'ll>(
         }
     }
 
+    // M5r R2 [LLM-generated]: rustc only passes the bounds policy; the late CHERI pass
+    // (RISCVCheriBoundsLowering) makes every per-check decision.
+    {
+        use rustc_session::config::CheriCapBoundsChecks;
+        let policy = match sess.opts.unstable_opts.cheri_cap_bounds_checks {
+            CheriCapBoundsChecks::Off => None,
+            CheriCapBoundsChecks::Narrow => Some("narrow"),
+            CheriCapBoundsChecks::Elide if sess.opts.unstable_opts.cheri_elide_upper_bound => {
+                Some("ub")
+            }
+            CheriCapBoundsChecks::Elide => Some("elide"),
+        };
+        if let Some(policy) = policy {
+            llvm::add_module_flag_str(
+                llmod,
+                llvm::ModuleFlagMergeBehavior::Override,
+                "cheri.bounds-policy",
+                policy,
+            );
+        }
+    }
+
     // If skipping the PLT is enabled, we need to add some module metadata
     // to ensure intrinsic calls don't use it.
     if !sess.needs_plt() {

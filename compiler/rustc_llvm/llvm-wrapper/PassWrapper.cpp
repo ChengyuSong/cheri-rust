@@ -50,6 +50,7 @@
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/Scalar/AnnotationRemarks.h"
 #if LLVM_VERSION_GE(23, 0)
+#include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Utils/AssignGUID.h"
 #endif
 #include "llvm/Transforms/Utils/CanonicalizeAliases.h"
@@ -926,6 +927,15 @@ extern "C" LLVMRustResult LLVMRustOptimize(
       });
     }
   }
+
+  // M5r R2 [LLM-generated]: the final InstCombine of the M5.0 pipeline (which ran it
+  // after CheriContractDischarge at OptimizerLast). Kept so R2 matches M5.0's control
+  // pipeline; no CHERI decision is made here.
+  OptimizerLastEPCallbacks.push_back(
+      [](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
+        if (Level != OptimizationLevel::O0)
+          MPM.addPass(createModuleToFunctionPassAdaptor(InstCombinePass()));
+      });
 
   ModulePassManager MPM;
   bool NeedThinLTOBufferPasses = true;
