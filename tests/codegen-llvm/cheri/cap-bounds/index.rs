@@ -42,11 +42,11 @@ pub fn array_small(a: &[u32; 16], i: usize) -> u32 {
 // CHECK-LABEL: @local_array(
 #[no_mangle]
 pub fn local_array(i: usize, x: u64) -> u64 {
-    // M5r R3 (D23): GVN merges the `i ^ 1` and `i` checks (same predicate) into one panic
-    // block whose marker no longer names a single site, so the late pass keeps it (a merged
-    // check is never removed). M5.0 narrowed here; see RESULTS-m5r.3.md.
-    // elide: icmp ult i64 %i, 8
-    // elide: panic_bounds_check
+    // M5r R4 (D26): GVN merges the `i ^ 1` and `i` checks (same predicate); the late pass
+    // adopts the `a[i]` guard into the surviving marker and narrows it exactly (the dead
+    // `a[i ^ 1]` store is gone: it never aliases `a[i]`, and `i ^ 1 < 8` iff `i < 8`).
+    // elide: @llvm.cheri.cap.bounds.set.exact.i64(ptr addrspace(200) nonnull %a, i64 64)
+    // elide-NOT: panic_bounds_check
     // off: panic_bounds_check
     let mut a = [x; 8];
     a[i ^ 1] = x + 1;
@@ -76,9 +76,11 @@ pub fn slice_load(s: &[u64], i: usize) -> u64 {
     // elide-NOT: icmp
     // elide: getelementptr [8 x i8], ptr addrspace(200) {{.*}}, i64 %i
     // elide-NEXT: load i64
+    // M5r R4 (D22): one tag test; the rounded narrow and the check are on the slow path,
+    // joined into the fast path by a PHI.
     // elide: [[SLOW]]:
-    // elide: @llvm.cheri.cap.bounds.set.i64(ptr addrspace(200) {{.*}}%s.0,
     // elide: icmp ult i64 %i, %s.1
+    // elide: @llvm.cheri.cap.bounds.set.i64(ptr addrspace(200) {{.*}}%s.0,
     // elide: panic_bounds_check
     s[i]
 }
