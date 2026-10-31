@@ -177,7 +177,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     fn mem_id(&self, n: usize) -> u64 {
         use std::hash::{Hash, Hasher};
         let tcx = self.cx.tcx();
-        let mut h = rustc_hash::FxHasher::default();
+        let mut h = rustc_data_structures::fx::FxHasher::default();
         tcx.symbol_name(self.instance).name.hash(&mut h);
         ((h.finish() & 0x7_ffff_ffff) << 24) | (n as u64 & 0xff_ffff)
     }
@@ -1058,7 +1058,6 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             && self.is_global_alloc(args.type_at(1))
     }
 
-    /// Called from the `Assert` arm for a site. Narrows the base capability, records it
 }
 
 /// Operands of `rvalue` that are read from memory when it is evaluated. Borrows,
@@ -1287,8 +1286,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             out.loans_eligible += 1;
             let id = self.mem_id(local.index()) | (1 << 62);
             let use_set: FxHashSet<(BasicBlock, UseAt)> = uses.iter().copied().collect();
+            let use_blocks: FxHashSet<BasicBlock> = uses.iter().map(|&(b, _)| b).collect();
             for &(bb, at) in &uses {
-                if !use_reachable_after(mir, &use_set, bb, at) {
+                if !use_reachable_after(mir, &use_set, &use_blocks, bb, at) {
                     out.at.entry((bb, at)).or_default().push((local, id));
                 }
             }
@@ -1438,6 +1438,7 @@ impl<'tcx> Visitor<'tcx> for Mentions {
 fn use_reachable_after(
     mir: &mir::Body<'_>,
     uses: &FxHashSet<(BasicBlock, UseAt)>,
+    use_blocks: &FxHashSet<BasicBlock>,
     bb: BasicBlock,
     at: UseAt,
 ) -> bool {
@@ -1449,7 +1450,7 @@ fn use_reachable_after(
         }
     }
     // Any use in a block reachable from a successor (including `bb` itself via a loop).
-    let block_has_use = |b: BasicBlock| uses.iter().any(|&(ub, _)| ub == b);
+    let block_has_use = |b: BasicBlock| use_blocks.contains(&b);
     let mut seen: FxHashSet<BasicBlock> = FxHashSet::default();
     let mut stack: Vec<BasicBlock> = mir[bb].terminator().successors().collect();
     while let Some(b) = stack.pop() {
