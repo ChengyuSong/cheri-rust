@@ -1206,6 +1206,7 @@ pub(crate) struct MemStats {
     pub loan_starts_missed: u32,
     pub loan_slot_ssa: u32,
     pub loan_ends_inline_call: u32,
+    pub loan_ends_backward: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1498,7 +1499,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
     /// After the terminator: unless the successor is merged into this backend block, the
     /// ids that found no carrier are dropped (counted; at a return the frame dies anyway).
-    pub(crate) fn mem_loan_block_end(&mut self, term: &mir::Terminator<'tcx>, merged: bool) {
+    pub(crate) fn mem_loan_block_end(&mut self, bx: &mut Bx, term: &mir::Terminator<'tcx>, merged: bool) {
         if merged {
             return;
         }
@@ -1530,6 +1531,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
             if carried {
                 self.mem_stats.loan_ends_carried += ids.len() as u32;
+            } else if matches!(term.kind, T::Goto { .. } | T::SwitchInt { .. })
+                && bx.mem_last_use_last_in_block(&ids)
+            {
+                // R6 (D42): the last carrier before the end point in this block.
+                self.mem_stats.loan_ends_backward += ids.len() as u32;
             } else {
                 self.mem_stats.loan_ends_missed += ids.len() as u32;
             }
@@ -1562,7 +1568,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let s = &self.mem_stats;
         let tcx = self.cx.tcx();
         let line = format!(
-            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\n",
+            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\n",
             tcx.symbol_name(self.instance).name,
             s.sites_matched,
             s.sites_unmatched,
@@ -1587,6 +1593,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             s.loan_starts_missed,
             s.loan_slot_ssa,
             s.loan_ends_inline_call,
+            s.loan_ends_backward,
         );
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {

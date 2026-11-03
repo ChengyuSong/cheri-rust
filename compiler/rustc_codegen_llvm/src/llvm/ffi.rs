@@ -1200,6 +1200,11 @@ unsafe extern "C" {
     pub(crate) fn LLVMIsALoadInst(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsAStoreInst(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsACallInst(Val: &Value) -> Option<&Value>;
+    // M5r R6 (D42)
+    pub(crate) fn LLVMGetPreviousInstruction(Inst: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsATerminatorInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsABranchInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsASwitchInst(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMGetNumArgOperands(Instr: &Value) -> c_uint;
     pub(crate) fn LLVMGetCalledValue(Instr: &Value) -> Option<&Value>;
     pub(crate) fn LLVMGetFirstBasicBlock(Fn: &Value) -> &BasicBlock;

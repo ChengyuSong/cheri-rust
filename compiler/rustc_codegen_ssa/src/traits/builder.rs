@@ -407,6 +407,13 @@ pub trait BuilderMethods<'a, 'tcx>:
     fn mem_last_use_first_since(&mut self, _mark: Option<Self::Value>, _loans: &[u64]) -> bool {
         false
     }
+    /// [LLM-generated] M5r R6 (D42): tag the *last* carrier already emitted in the
+    /// current block (before its terminator) with `!mem.last_use !{loans}`: a loan end
+    /// whose forward carrier would be in a join block. Nothing between that carrier and
+    /// the end point accesses memory (it would be a carrier), so the loan ends there.
+    fn mem_last_use_last_in_block(&mut self, _loans: &[u64]) -> bool {
+        false
+    }
     fn inbounds_gep(
         &mut self,
         ty: Self::Type,

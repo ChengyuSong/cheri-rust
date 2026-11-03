@@ -1138,6 +1138,54 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
+    fn mem_last_use_last_in_block(&mut self, loans: &[u64]) -> bool {
+        let found = unsafe {
+            let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let mut cur = llvm::LLVMGetLastInstruction(bb);
+            // Skip the terminator (a branch: the end point is before it).
+            if let Some(t) = cur
+                && llvm::LLVMIsATerminatorInst(t).is_some()
+            {
+                if llvm::LLVMIsABranchInst(t).is_none() && llvm::LLVMIsASwitchInst(t).is_none() {
+                    return false;
+                }
+                cur = llvm::LLVMGetPreviousInstruction(t);
+            }
+            let mut found = None;
+            while let Some(i) = cur {
+                let ok = if llvm::LLVMIsALoadInst(i).is_some() || llvm::LLVMIsAStoreInst(i).is_some() {
+                    true
+                } else if llvm::LLVMIsACallInst(i).is_some() {
+                    match llvm::LLVMGetCalledValue(i) {
+                        Some(f) => {
+                            let n = llvm::get_value_name(f);
+                            !n.starts_with(b"llvm.")
+                                || n.starts_with(b"llvm.memcpy")
+                                || n.starts_with(b"llvm.memmove")
+                                || n.starts_with(b"llvm.memset")
+                        }
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+                if ok {
+                    found = Some(i);
+                    break;
+                }
+                cur = llvm::LLVMGetPreviousInstruction(i);
+            }
+            found
+        };
+        match found {
+            Some(i) => {
+                self.mem_last_use(i, loans);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn mem_last_use_since(
         &mut self,
         mark: Option<&'ll Value>,

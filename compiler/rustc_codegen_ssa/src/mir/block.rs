@@ -1675,7 +1675,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     self.mem_stats.loan_ends_missed += ids.len() as u32;
                 }
             }
-            self.mem_loan_block_end(data.terminator(), matches!(merging_succ, MergingSucc::True));
+            self.mem_loan_block_end(bx, data.terminator(), matches!(merging_succ, MergingSucc::True));
             // Never let a pending marker reach an unrelated call.
             self.mem_call_bundle = None;
             self.mem_call_last_use = None;
