@@ -159,6 +159,19 @@ mod attr_impl {
             /// executing. Only valid on arguments (including return values that are passed
             /// indirectly as arguments).
             const NoFree   = 1 << 9;
+            /// CHERI (local M2 prototype, LLM-generated): a safe pointer (`&T`, `&mut T`,
+            /// `Box<T>`) whose capability is bounded to (at most) its Rust allocation.
+            /// Emitted as the target-neutral LLVM string attribute `"mem.alloc_inbounds"`.
+            const AllocInbounds = 1 << 10;
+            /// CHERI M3.2 (local prototype, LLM-generated): a `Box<T>` from the `Global`
+            /// allocator. Emitted as `"mem.box_family"="__rust_alloc"`.
+            const BoxFamily = 1 << 11;
+            /// CHERI M3.2: `valid_cstr`. Emitted as `"mem.cstr"`.
+            const CStr = 1 << 12;
+            /// CHERI M3.2: a borrow whose lifetime is tied to the return value: only the
+            /// address may escape otherwise. Emitted as `captures(address, ret: address,
+            /// provenance)`; takes precedence over the other `Captures*` levels.
+            const CapturesRetBorrow = 1 << 13;
         }
     }
     rustc_data_structures::external_bitflags_debug! { ArgAttribute }
@@ -185,6 +198,58 @@ pub struct ArgAttributes {
     pub pointee_size: Size,
     /// The minimum alignment of the pointee, if any.
     pub pointee_align: Option<Align>,
+    /// CHERI M3.2 (local prototype, LLM-generated): slice-extent facts, packed so that
+    /// `ArgAttributes` does not grow.
+    pub cheri: CheriFacts,
+}
+
+/// CHERI M3.2: where the length of a `"mem.range"` comes from.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum CheriRangeLen {
+    /// The second half of the same `PassMode::Pair` (a `&[T]` / `&str`).
+    PairNext,
+    /// The Rust argument with this index (a raw `(ptr, len)` contract).
+    Arg(u32),
+}
+
+/// CHERI M3.2: at most one of
+/// - `"mem.range"` on a pointer: valid for `len * elem` bytes, `len` being the second half of
+///   the same pair (element size stored) or another Rust argument (index stored; the element
+///   size is the pointee size, recomputed in codegen);
+/// - a slice length of `elem`-byte elements on an integer (`len * elem <= isize::MAX`).
+///
+/// Packed in a `u16` so that `ArgAttributes` does not grow: bits 14..16 kind (0 none,
+/// 1 range/pair-next, 2 range/arg, 3 length), bits 0..14 payload. Facts whose payload does
+/// not fit are dropped.
+#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Debug, StableHash)]
+pub struct CheriFacts(u16);
+
+impl CheriFacts {
+    const MAX: u64 = (1 << 14) - 1;
+    fn pack(kind: u16, payload: u64) -> Self {
+        if payload > Self::MAX { Self(0) } else { Self(kind << 14 | payload as u16) }
+    }
+    pub fn range_pair(elem: Size) -> Self {
+        Self::pack(1, elem.bytes())
+    }
+    pub fn range_arg(len_arg: usize) -> Self {
+        Self::pack(2, len_arg as u64)
+    }
+    pub fn len_elem(elem: Size) -> Self {
+        if elem.bytes() == 0 { Self(0) } else { Self::pack(3, elem.bytes()) }
+    }
+    /// The length source, and the element size if stored.
+    pub fn get_range(self) -> Option<(CheriRangeLen, Option<Size>)> {
+        let p = (self.0 & Self::MAX as u16) as u64;
+        match self.0 >> 14 {
+            1 => Some((CheriRangeLen::PairNext, Some(Size::from_bytes(p)))),
+            2 => Some((CheriRangeLen::Arg(p as u32), None)),
+            _ => None,
+        }
+    }
+    pub fn get_len_elem(self) -> Option<Size> {
+        (self.0 >> 14 == 3).then(|| Size::from_bytes(self.0 & Self::MAX as u16))
+    }
 }
 
 impl ArgAttributes {
@@ -194,6 +259,7 @@ impl ArgAttributes {
             arg_ext: ArgExtension::None,
             pointee_size: Size::ZERO,
             pointee_align: None,
+            cheri: CheriFacts::default(),
         }
     }
 
@@ -243,6 +309,7 @@ impl From<ArgAttribute> for ArgAttributes {
             arg_ext: ArgExtension::None,
             pointee_size: Size::ZERO,
             pointee_align: None,
+            cheri: CheriFacts::default(),
         }
     }
 }

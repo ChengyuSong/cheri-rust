@@ -1333,6 +1333,8 @@ impl<T: ?Sized> Box<T> {
     #[stable(feature = "box_raw", since = "1.4.0")]
     #[inline]
     #[must_use = "call `drop(Box::from_raw(ptr))` if you intend to drop the `Box`"]
+    // CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+    #[core::contracts::mem_contract(requires(valid_box::<T>(raw)))]
     pub unsafe fn from_raw(raw: *mut T) -> Self {
         // SAFETY: Upheld by caller.
         unsafe { Self::from_raw_in(raw, Global) }
@@ -1566,6 +1568,15 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     #[inline]
     pub unsafe fn from_raw_in(raw: *mut T, alloc: A) -> Self {
         // SAFETY: Upheld by caller.
+        // CHERI M3.3: establish the Box type contract's spatial extent at this
+        // conversion (or discharge it when provenance already proves the bound).
+        // `size_of_val_raw` covers both thin `T` and fat `Box<[U]>` / `Box<str>`.
+        let bytes = unsafe { core::mem::size_of_val_raw(raw) };
+        let raw = if bytes == 0 {
+            raw
+        } else {
+            unsafe { core::intrinsics::cheri_contract_narrow(raw, bytes) as *mut T }
+        };
         Box(unsafe { Unique::new_unchecked(raw) }, alloc)
     }
 

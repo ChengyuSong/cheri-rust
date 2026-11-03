@@ -550,6 +550,8 @@ mod mut_ptr;
 #[inline(always)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 #[rustc_diagnostic_item = "ptr_copy_nonoverlapping"]
+// CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+#[crate::contracts::mem_contract(requires(valid_slice::<T>(src, count) && valid_slice_mut::<T>(dst, count)))]
 pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
     ub_checks::assert_unsafe_precondition!(
         check_language_ub,
@@ -571,8 +573,23 @@ pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: us
 
     // SAFETY: the safety contract for `copy_nonoverlapping` must be
     // upheld by the caller.
+    // CHERI M3.4: conversion-narrow of the transferred extent is done in the
+    // codegen of CopyNonOverlapping / memcpy (operands only; see RESULTS-m3.4).
     unsafe { crate::intrinsics::copy_nonoverlapping(src, dst, count) }
 }
+
+/// CHERI M3.3: narrow `p` to `count` elements of `T` at a conversion / raw-op site.
+#[inline(always)]
+const unsafe fn cheri_narrow_elems<T>(p: *const T, count: usize) -> *const T {
+    let bytes = count.saturating_mul(crate::mem::size_of::<T>());
+    if bytes == 0 {
+        p
+    } else {
+        // SAFETY: intrinsic is an identity off CHERI / when discharged.
+        unsafe { crate::intrinsics::cheri_contract_narrow(p, bytes) }
+    }
+}
+
 
 /// Copies `count * size_of::<T>()` bytes from `src` to `dst`. The source
 /// and destination may overlap.
@@ -647,6 +664,8 @@ pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: us
 #[inline(always)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 #[rustc_diagnostic_item = "ptr_copy"]
+// CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+#[crate::contracts::mem_contract(requires(valid_slice::<T>(src, count) && valid_slice_mut::<T>(dst, count)))]
 pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
     // SAFETY: the safety contract for `copy` must be upheld by the caller.
     unsafe {
@@ -662,6 +681,7 @@ pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
             ub_checks::maybe_is_aligned_and_not_null(src, align, zero_size)
                 && ub_checks::maybe_is_aligned_and_not_null(dst, align, zero_size)
         );
+        // CHERI M3.4: conversion-narrow at memcpy/memset lowering (see RESULTS-m3.4).
         crate::intrinsics::copy(src, dst, count)
     }
 }
@@ -721,6 +741,8 @@ pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
 #[inline(always)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 #[rustc_diagnostic_item = "ptr_write_bytes"]
+// CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+#[crate::contracts::mem_contract(requires(valid_slice_mut::<T>(dst, count)))]
 pub const unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize) {
     // SAFETY: the safety contract for `write_bytes` must be upheld by the caller.
     unsafe {
@@ -733,6 +755,7 @@ pub const unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize) {
                 zero_size: bool = T::IS_ZST || count == 0,
             ) => ub_checks::maybe_is_aligned_and_not_null(addr, align, zero_size)
         );
+        // CHERI M3.4: conversion-narrow at memcpy/memset lowering (see RESULTS-m3.4).
         crate::intrinsics::write_bytes(dst, val, count)
     }
 }
@@ -1728,6 +1751,8 @@ pub const unsafe fn replace<T>(dst: *mut T, src: T) -> T {
 #[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
 #[track_caller]
 #[rustc_diagnostic_item = "ptr_read"]
+// CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+#[crate::contracts::mem_contract(requires(valid_ref::<T>(src)))]
 pub const unsafe fn read<T>(src: *const T) -> T {
     // It would be semantically correct to implement this via `copy_nonoverlapping`
     // and `MaybeUninit`, as was done before PR #109035. Calling `assume_init`
@@ -1767,6 +1792,7 @@ pub const unsafe fn read<T>(src: *const T) -> T {
                 is_zst: bool = T::IS_ZST,
             ) => ub_checks::maybe_is_aligned_and_not_null(addr, align, is_zst)
         );
+        let src = cheri_narrow_elems(src, 1);
         crate::intrinsics::read_via_copy(src)
     }
 }
@@ -1952,6 +1978,8 @@ pub const unsafe fn read_unaligned<T>(src: *const T) -> T {
 #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
 #[rustc_diagnostic_item = "ptr_write"]
 #[track_caller]
+// CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+#[crate::contracts::mem_contract(requires(valid_ref_mut::<T>(dst)))]
 pub const unsafe fn write<T>(dst: *mut T, src: T) {
     // Semantically, it would be fine for this to be implemented as a
     // `copy_nonoverlapping` and appropriate drop suppression of `src`.
@@ -1975,6 +2003,7 @@ pub const unsafe fn write<T>(dst: *mut T, src: T) {
                 is_zst: bool = T::IS_ZST,
             ) => ub_checks::maybe_is_aligned_and_not_null(addr, align, is_zst)
         );
+        let dst = cheri_narrow_elems(dst, 1) as *mut T;
         intrinsics::write_via_move(dst, src)
     }
 }

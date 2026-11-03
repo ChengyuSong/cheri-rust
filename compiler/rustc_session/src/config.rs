@@ -3634,15 +3634,16 @@ impl PatchableFunctionEntry {
 
 /// `-Z cheri-cap-bounds-checks` values.
 ///
-/// `Narrow` and `Elide` are accepted so later passes can key off them. Neither changes codegen yet.
+/// `Narrow` and `Elide` narrow the capability at built-in `a[i]` accesses (M1, see
+/// `rustc_codegen_ssa::mir::cheri_bounds`).
 #[derive(Clone, Copy, PartialEq, Hash, Debug, Default)]
 pub enum CheriCapBoundsChecks {
     /// Software bounds checks only.
     #[default]
     Off,
-    /// Reserved: narrow the capability and keep the software check.
+    /// Narrow the capability and keep the software check.
     Narrow,
-    /// Reserved: narrow the capability and drop the software check. Requires narrowing.
+    /// Narrow the capability and drop the software check where the narrowing is exact.
     Elide,
 }
 

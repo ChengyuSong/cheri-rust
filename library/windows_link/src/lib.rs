@@ -7,6 +7,7 @@
 #![feature(decl_macro)]
 #![feature(no_core)]
 
+#![allow(unknown_lints, mem_contract_undischarged)] // CHERI M3.5: warn-by-default; stdlib silenced
 pub macro link_raw_dylib {
     ($library:literal $abi:literal $($link_name:literal)? $(#[$doc:meta])? fn $($function:tt)*) => (
         #[cfg_attr(not(target_arch = "x86"), link(name = $library, kind = "raw-dylib", modifiers = "+verbatim"))]

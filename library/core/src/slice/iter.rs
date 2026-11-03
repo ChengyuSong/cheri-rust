@@ -94,6 +94,20 @@ impl<'a, T> Iter<'a, T> {
     pub(super) const fn new(slice: &'a [T]) -> Self {
         let len = slice.len();
         let ptr: NonNull<T> = NonNull::from_ref(slice).cast();
+        // CHERI M5r R4 (D25) [LLM-generated]: loop-level claim of the iterated extent at
+        // iterator creation (a fact; the late CHERI pass narrows it in noskip and discharges
+        // it when the slice is provably allocation-bounded).
+        let ptr = if T::IS_ZST || len == 0 {
+            ptr
+        } else {
+            // SAFETY: the claim returns the same address with bounds of the slice.
+            unsafe {
+                NonNull::new_unchecked(crate::intrinsics::cheri_contract_narrow(
+                    ptr.as_ptr() as *const T,
+                    len.unchecked_mul(size_of::<T>()),
+                ) as *mut T)
+            }
+        };
         // SAFETY: Similar to `IterMut::new`.
         unsafe {
             let end_or_len =
@@ -219,6 +233,20 @@ impl<'a, T> IterMut<'a, T> {
     pub(super) const fn new(slice: &'a mut [T]) -> Self {
         let len = slice.len();
         let ptr: NonNull<T> = NonNull::from_mut(slice).cast();
+        // CHERI M5r R4 (D25) [LLM-generated]: loop-level claim of the iterated extent at
+        // iterator creation (a fact; the late CHERI pass narrows it in noskip and discharges
+        // it when the slice is provably allocation-bounded).
+        let ptr = if T::IS_ZST || len == 0 {
+            ptr
+        } else {
+            // SAFETY: the claim returns the same address with bounds of the slice.
+            unsafe {
+                NonNull::new_unchecked(crate::intrinsics::cheri_contract_narrow(
+                    ptr.as_ptr() as *const T,
+                    len.unchecked_mul(size_of::<T>()),
+                ) as *mut T)
+            }
+        };
         // SAFETY: There are several things here:
         //
         // `ptr` has been obtained by `slice.as_ptr()` where `slice` is a valid

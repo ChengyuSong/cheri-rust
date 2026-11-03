@@ -553,6 +553,9 @@ fn borrowck_check_region_constraints<'diag, 'tcx>(
 
     mbcx.report_move_errors();
 
+    // [LLM-generated] CHERI M5r R3 (D17): record the loan-end points for codegen.
+    record_cheri_loan_ends(tcx, def, body, &regioncx, &borrow_set);
+
     // For each non-user used mutable variable, check if it's been assigned from
     // a user-declared local. If so, then put that local into the used_mut set.
     // Note that this set is expected to be small - only upvars from closures
@@ -601,6 +604,48 @@ fn borrowck_check_region_constraints<'diag, 'tcx>(
     debug!("do_mir_borrowck: result = {:#?}", result);
 
     result
+}
+
+/// [LLM-generated] CHERI M5r R3 (D17): borrowck's out-of-scope point of every real
+/// (non-fake) loan, keyed by `mir_promoted` location, stored in `tcx.cheri_loan_ends` for
+/// `mir_drops_elaborated_and_const_checked` to turn into `LoanEnd` markers. A loan that is
+/// live until the end of the body (it escapes through the return value or a longer-lived
+/// place) has no out-of-scope point and gets no marker. Only facts are recorded here; what
+/// to invalidate is decided by the late CHERI pass.
+fn record_cheri_loan_ends<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+    body: &Body<'tcx>,
+    regioncx: &RegionInferenceContext<'tcx>,
+    borrow_set: &BorrowSet<'tcx>,
+) {
+    let opts = &tcx.sess.opts.unstable_opts;
+    if std::env::var_os("MEM_ANNOT_DEBUG").is_some() {
+        eprintln!("MEM-LOAN-ENDS? {:?} cheri={} annot={} le={} pol={:?}", def, tcx.sess.target.is_like_cheri, opts.cheri_annotate, opts.cheri_loan_ends, opts.polonius);
+    }
+    if !tcx.sess.target.is_like_cheri
+        || !opts.cheri_annotate
+        || !opts.cheri_loan_ends
+    {
+        return;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_data_structures::fx::FxHasher::default();
+    tcx.def_path_hash(def.to_def_id()).hash(&mut h);
+    let base = h.finish();
+    let _ = borrow_set;
+    let mut v = Vec::new();
+    for (loc, n) in crate::dataflow::cheri_all_loans_out_of_scope(body, regioncx) {
+        let mut h = rustc_data_structures::fx::FxHasher::default();
+        (base, n).hash(&mut h);
+        v.push((loc, h.finish()));
+    }
+    if std::env::var_os("MEM_ANNOT_DEBUG").is_some() {
+        eprintln!("MEM-LOAN-ENDS {:?}: {} borrows, {} end points", def, borrow_set.len(), v.len());
+    }
+    if !v.is_empty() {
+        tcx.cheri_loan_ends.lock().insert(def, v);
+    }
 }
 
 fn get_flow_results<'a, 'tcx>(
@@ -849,6 +894,7 @@ impl<'a, 'tcx> ResultsVisitor<'tcx, Borrowck<'a, 'tcx>> for MirBorrowckCtxt<'a, 
                     span,
                     "Unexpected CopyNonOverlapping, should only appear after lower_intrinsics",
                 ),
+                NonDivergingIntrinsic::LoanEnd(..) => {}
             },
             // Only relevant for mir typeck
             StatementKind::AscribeUserType(..) => {}

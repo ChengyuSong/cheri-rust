@@ -253,6 +253,8 @@ impl CStr {
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_cstr_from_ptr", since = "1.81.0")]
+    // CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+    #[crate::contracts::mem_contract(requires(valid_cstr(ptr)))]
     pub const unsafe fn from_ptr<'a>(ptr: *const c_char) -> &'a CStr {
         // SAFETY: The caller has provided a pointer that points to a valid C
         // string with a NUL terminator less than `isize::MAX` from `ptr`.

@@ -12,9 +12,10 @@ use rustc_middle::ty::layout::{
 };
 use rustc_middle::ty::{self, InstanceKind, ShimKind, Ty, TyCtxt, Unnormalized};
 use rustc_span::def_id::DefId;
-use rustc_span::{DUMMY_SP, bug};
+use rustc_hir::def::DefKind;
+use rustc_span::{DUMMY_SP, bug, sym};
 use rustc_target::callconv::{
-    AbiMap, ArgAbi, ArgAttribute, ArgAttributes, FnAbi, IndirectMode, PassMode,
+    AbiMap, ArgAbi, ArgAttribute, ArgAttributes, CheriFacts, FnAbi, IndirectMode, PassMode,
 };
 use tracing::debug;
 
@@ -328,6 +329,7 @@ fn arg_attrs_for_rust_scalar<'tcx>(
     offset: Size,
     is_return: bool,
     determined_fn_def_id: Option<DefId>,
+    rustic_abi: bool,
 ) -> ArgAttributes {
     let mut attrs = ArgAttributes::new();
 
@@ -414,6 +416,33 @@ fn arg_attrs_for_rust_scalar<'tcx>(
             if matches!(kind, PointerKind::SharedRef { frozen: true }) && !is_return {
                 attrs.set(ArgAttribute::ReadOnly);
                 attrs.set(ArgAttribute::CapturesReadOnly);
+            }
+
+            // CHERI M2 (local prototype): safe pointers are allocation-bounded under M1r.
+            // M3.0: not for parameters of non-Rust-ABI definitions, whose callers may be C
+            // passing arbitrary capabilities; such definitions narrow these parameters at
+            // entry instead (`-Zcheri-export-entry-bounds`, see `cheri_bounds.rs`).
+            // M3.2: the type contract of a typed signature is also an IR fact on
+            // - returns (the callee produced a valid `&T` / `Box<T>`; for a C callee this is
+            //   C's trusted promise, as for the C mirror's `RS_RET_*`), and
+            // - parameters of foreign declarations (Rust calling C: Rust passes the typed
+            //   value, so the fact holds; Q-M3.1b).
+            let callee_is_foreign =
+                determined_fn_def_id.is_some_and(|def_id| tcx.is_foreign_item(def_id));
+            if tcx.sess.target.is_like_cheri
+                && (is_return
+                    || rustic_abi
+                    || callee_is_foreign
+                    || !tcx.sess.opts.unstable_opts.cheri_export_entry_bounds)
+            {
+                attrs.set(ArgAttribute::AllocInbounds);
+            }
+            // M3.2: `Box<T>` (Global) records its allocator family, the trusted part of
+            // `valid_box`.
+            if tcx.sess.target.is_like_cheri
+                && matches!(kind, PointerKind::Box { global: true, .. })
+            {
+                attrs.set(ArgAttribute::BoxFamily);
             }
         }
     }
@@ -589,7 +618,15 @@ fn fn_abi_new_uncached<'tcx>(
         };
 
         Ok(ArgAbi::new(layout, |scalar, offset| {
-            arg_attrs_for_rust_scalar(*cx, scalar, layout, offset, is_return, determined_fn_def_id)
+            arg_attrs_for_rust_scalar(
+                *cx,
+                scalar,
+                layout,
+                offset,
+                is_return,
+                determined_fn_def_id,
+                sig.abi().is_rustic_abi(),
+            )
         }))
     };
 
@@ -615,6 +652,9 @@ fn fn_abi_new_uncached<'tcx>(
         ),
     };
     fn_abi_adjust_for_abi(cx, &mut fn_abi, sig.abi());
+    if !is_virtual_call && let Some(def_id) = determined_fn_def_id {
+        cheri_contract_facts(cx, &mut fn_abi, def_id, inputs.len());
+    }
     debug!("fn_abi_new_uncached = {:?}", fn_abi);
     fn_abi_sanity_check(cx, &fn_abi, sig.abi());
     Ok(tcx.arena.alloc(fn_abi))
@@ -735,5 +775,205 @@ fn make_thin_self_ptr<'tcx>(
         // NOTE(eddyb) using an empty `ParamEnv`, and `unwrap`-ing the `Result`
         // should always work because the type is always `*mut ()`.
         ..tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(unit_ptr_ty)).unwrap()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CHERI M3.2 (local research prototype, LLM-generated): type contracts as IR
+// facts. See /workspace/cheri/m3/CONTRACTS.md. Complements the per-scalar
+// facts of `arg_attrs_for_rust_scalar` with the ones that need the whole
+// signature:
+// - typed signatures: lifetime-derived captures for `&T` / `&mut T` /
+//   `Option<&T>` / `&[T]` parameters, and `"mem.range"` on Rust-ABI `&[T]`;
+// - raw-pointer type contracts (`#[rustc_mem_contract]`, injected by
+//   `core::contracts::{requires, mem_contract}`), mapped exactly as the C
+//   mirror (`mem_contract.h` + LLVM `mem-contract-c`).
+// ---------------------------------------------------------------------------
+
+/// The region of a top-level `&'r T` or `Option<&'r T>` parameter.
+fn cheri_top_ref_region<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<ty::Region<'tcx>> {
+    match *ty.kind() {
+        ty::Ref(r, ..) => Some(r),
+        ty::Adt(adt, args) if tcx.is_diagnostic_item(sym::Option, adt.did()) => {
+            match *args.type_at(0).kind() {
+                ty::Ref(r, ..) => Some(r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn cheri_count_region<'tcx>(ty: Ty<'tcx>, r: ty::Region<'tcx>) -> usize {
+    ty.walk()
+        .filter(|arg| matches!(arg.kind(), ty::GenericArgKind::Lifetime(re) if re == r))
+        .count()
+}
+
+fn cheri_set_captures(attrs: &mut ArgAttributes, claim: ArgAttribute) {
+    attrs.regular -= ArgAttribute::CapturesNone; // clears all three capture levels
+    attrs.regular -= ArgAttribute::CapturesRetBorrow;
+    attrs.regular |= claim;
+}
+
+/// The (first) pointer attributes of an argument passed as a scalar or pair.
+fn cheri_ptr_attrs<'a, 'tcx>(arg: &'a mut ArgAbi<'tcx, Ty<'tcx>>) -> Option<&'a mut ArgAttributes> {
+    match &mut arg.mode {
+        PassMode::Direct(attrs) | PassMode::Pair(attrs, _) => Some(attrs),
+        _ => None,
+    }
+}
+
+fn cheri_contract_facts<'tcx>(
+    cx: &LayoutCx<'tcx>,
+    fn_abi: &mut FnAbi<'tcx, Ty<'tcx>>,
+    def_id: DefId,
+    n_inputs: usize,
+) {
+    let tcx = cx.tcx();
+    if !tcx.sess.target.is_like_cheri
+        || !matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn)
+    {
+        return;
+    }
+    let poly = tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
+    let usig = poly.skip_binder();
+    if usig.inputs().len() != n_inputs || fn_abi.args.len() < n_inputs {
+        return;
+    }
+    let is_decl = tcx.is_foreign_item(def_id);
+
+    // 1. Typed signatures: "not retained" from lifetimes (borrowck-checked).
+    //    A late-bound region that occurs exactly once in the inputs (in this
+    //    parameter) cannot outlive the call except through the return value.
+    for (i, &ty) in usig.inputs().iter().enumerate() {
+        let Some(r) = cheri_top_ref_region(tcx, ty) else { continue };
+        if !matches!(r.kind(), ty::ReBound(..)) {
+            continue; // 'static, or early-bound (may appear in where-clauses)
+        }
+        let n_in: usize = usig.inputs().iter().map(|&t| cheri_count_region(t, r)).sum();
+        if n_in != 1 {
+            continue;
+        }
+        let n_out = cheri_count_region(usig.output(), r);
+        let Some(attrs) = cheri_ptr_attrs(&mut fn_abi.args[i]) else { continue };
+        cheri_set_captures(
+            attrs,
+            if n_out == 0 { ArgAttribute::CapturesAddress } else { ArgAttribute::CapturesRetBorrow },
+        );
+    }
+    // 2. Typed signatures: a `&[T]` / `&str` passed as (ptr, len) carries its extent.
+    for arg in fn_abi.args.iter_mut() {
+        let elem = match *arg.layout.ty.kind() {
+            ty::Ref(_, p, _) => match *p.kind() {
+                ty::Slice(e) => cx.layout_of(e).map(|l| l.size).ok(),
+                ty::Str => Some(Size::from_bytes(1)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(sz) = elem
+            && sz != Size::ZERO
+            && let PassMode::Pair(a, _) = &mut arg.mode
+        {
+            a.cheri = CheriFacts::range_pair(sz);
+        }
+    }
+
+    // 3. Raw-pointer type contracts.
+    let Some(canons) = find_attr!(tcx, def_id, RustcMemContract(v) => v.clone()) else { return };
+    let full = is_decl || tcx.sess.opts.unstable_opts.cheri_contract_def_facts;
+    let mut keep = vec![];
+    let mut ret_borrows = vec![];
+    let mut items = vec![];
+    for canon in canons.iter() {
+        for item in canon.as_str().split(';').filter(|s| !s.is_empty()) {
+            let Some((kind, rest)) = item.split_once('(') else { continue };
+            let args: Vec<&str> = rest.trim_end_matches(')').split(',').collect();
+            match kind {
+                "keep" => keep.extend(args.first().and_then(|a| a.parse::<usize>().ok())),
+                "ret_borrows" => {
+                    ret_borrows.extend(args.first().and_then(|a| a.parse::<usize>().ok()))
+                }
+                _ => items.push((kind.to_string(), args.iter().map(|a| a.to_string()).collect::<Vec<_>>())),
+            }
+        }
+    }
+    for (kind, args) in items {
+        let is_slice = kind == "slice" || kind == "slice_mut";
+        let is_mut = kind.ends_with("_mut");
+        let is_box = kind == "box";
+        let is_cstr = kind == "cstr";
+        let shared = !is_mut && !is_box;
+        let is_ret = args.first().map(String::as_str) == Some("ret");
+        let p = if is_ret { None } else { args.first().and_then(|a| a.parse::<usize>().ok()) };
+        if !is_ret && p.is_none_or(|p| p >= n_inputs) {
+            continue;
+        }
+        let len = if is_slice { args.get(1).and_then(|a| a.parse::<usize>().ok()) } else { None };
+        if is_slice && len.is_none_or(|l| l >= n_inputs) {
+            continue;
+        }
+        let arg = match p {
+            Some(p) => &mut fn_abi.args[p],
+            None => &mut fn_abi.ret,
+        };
+        let Some(pointee) = arg.layout.ty.builtin_deref(true) else { continue };
+        let pl = cx.layout_of(pointee).ok().filter(|l| l.is_sized());
+        let (size, align) = match (is_cstr, pl) {
+            (true, _) => (Size::ZERO, None),
+            (false, Some(l)) => (l.size, Some(l.align.abi)),
+            (false, None) => continue,
+        };
+        let PassMode::Direct(attrs) = &mut arg.mode else { continue };
+        if is_slice && let Some(l) = len {
+            attrs.cheri = CheriFacts::range_arg(l);
+        }
+        if !full {
+            continue; // definitions: extent record only (M3.3 enforces the rest)
+        }
+        // Spatial part.
+        attrs.regular |= ArgAttribute::AllocInbounds | ArgAttribute::NonNull;
+        if let Some(a) = align
+            && a > Align::ONE
+        {
+            attrs.pointee_align = Some(a);
+        }
+        if (kind == "ref" || kind == "ref_mut") && !is_ret {
+            attrs.pointee_size = size;
+        }
+        if is_cstr {
+            attrs.regular |= ArgAttribute::CStr;
+        }
+        // Trusted part.
+        attrs.regular |= ArgAttribute::NoUndef;
+        if is_box {
+            attrs.regular |= ArgAttribute::BoxFamily;
+        }
+        if let Some(p) = p {
+            attrs.regular |= ArgAttribute::NoAlias;
+            if shared {
+                attrs.regular |= ArgAttribute::ReadOnly;
+            }
+            if !is_box {
+                attrs.regular |= ArgAttribute::NoFree;
+                let claim = if ret_borrows.contains(&p) {
+                    ArgAttribute::CapturesRetBorrow
+                } else if keep.contains(&p) {
+                    if shared { ArgAttribute::CapturesReadOnly } else { ArgAttribute::empty() }
+                } else {
+                    ArgAttribute::CapturesAddress // borrowed for the call (Q-M3.1a)
+                };
+                cheri_set_captures(attrs, claim);
+            }
+        }
+        if is_slice
+            && let Some(l) = len
+            && size != Size::ZERO
+            && let PassMode::Direct(la) = &mut fn_abi.args[l].mode
+        {
+            la.regular |= ArgAttribute::NoUndef;
+            la.cheri = CheriFacts::len_elem(size);
+        }
     }
 }

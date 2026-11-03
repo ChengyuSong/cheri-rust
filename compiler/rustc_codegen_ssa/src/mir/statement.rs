@@ -88,6 +88,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::StatementKind::Coverage(ref kind) => {
                 self.codegen_coverage(bx, kind, statement.source_info.scope);
             }
+            mir::StatementKind::Intrinsic(NonDivergingIntrinsic::LoanEnd(id)) => {
+                self.mem_loan_end(bx, id);
+            }
             mir::StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(ref op)) => {
                 let op_val = self.codegen_operand(bx, op);
                 bx.assume(op_val.immediate());
@@ -110,8 +113,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let bytes = bx.unchecked_sumul(count, bx.const_usize(elem_size));
 
                 let align = pointee_layout.layout.align.abi;
-                let dst = dst_val.immediate();
-                let src = src_val.immediate();
+                // M5r: claim the transferred extent for the memcpy operands only.
+                let src = super::mem_annot::mem_op_claim(bx, src_val.immediate(), bytes);
+                let dst = super::mem_annot::mem_op_claim(bx, dst_val.immediate(), bytes);
 
                 // Handling of CHERI capabilities could probably be more efficient.
                 bx.memcpy(

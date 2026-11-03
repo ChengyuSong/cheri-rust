@@ -955,6 +955,8 @@ impl<T: PointeeSized> *mut T {
     #[rustc_const_stable(feature = "const_ptr_offset", since = "1.61.0")]
     #[inline(always)]
     #[track_caller]
+    // CHERI M3.2 (local prototype, LLM-generated): the type contract of this raw op.
+    #[crate::contracts::mem_contract(requires(valid_slice::<T>(self, count)))]
     pub const unsafe fn add(self, count: usize) -> Self
     where
         T: Sized,

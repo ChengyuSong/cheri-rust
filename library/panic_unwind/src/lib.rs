@@ -23,6 +23,8 @@
 #![panic_runtime]
 #![feature(panic_runtime)]
 #![allow(internal_features)]
+#![allow(unknown_lints, mem_contract_undischarged)] // CHERI M3.5: warn-by-default; stdlib silenced
+
 #![allow(unused_features)]
 #![warn(unreachable_pub)]
 #![deny(unsafe_op_in_unsafe_fn)]

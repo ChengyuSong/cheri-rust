@@ -87,6 +87,8 @@ impl<'tcx> Visitor<'tcx> for CostChecker<'_, 'tcx> {
                 self.penalty += match **ndi {
                     NonDivergingIntrinsic::Assume(..) => INSTR_COST,
                     NonDivergingIntrinsic::CopyNonOverlapping(..) => CALL_PENALTY,
+                    // [LLM-generated] M5r D17: a marker only; must not change inlining.
+                    NonDivergingIntrinsic::LoanEnd(..) => 0,
                 };
             }
             StatementKind::Assign(..) => self.penalty += INSTR_COST,

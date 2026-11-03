@@ -3297,6 +3297,23 @@ pub const unsafe fn cheri_bounds_narrow_exact<T: PointeeSized>(
     ptr
 }
 
+/// CHERI M3.3 (local prototype): the narrow-once of a raw-to-typed conversion point.
+///
+/// Like [`cheri_bounds_narrow`] (`CSetBounds` to `bytes`, rounding up), but marked as a
+/// conversion narrow: codegen omits it when the conversion is reached from safe library
+/// code (a verified producer), and LLVM's CheriSkipNarrow removes it when the operand is
+/// provably allocation-bounded already. A stated `requires` never discharges it. The
+/// result counts as allocation-bounded for later per-access narrows.
+///
+/// The pointer is returned unchanged in CTFE, in Miri, on targets that are not CHERI, and
+/// with `-Zcheri-contract-narrow=no`.
+#[rustc_nounwind]
+#[unstable(feature = "core_intrinsics", issue = "none")]
+#[rustc_intrinsic]
+pub const unsafe fn cheri_contract_narrow<T: PointeeSized>(ptr: *const T, _bytes: usize) -> *const T {
+    ptr
+}
+
 /// Clear the tag of a CHERI capability (`CClearTag`).
 ///
 /// The address bits are kept. The pointer is returned unchanged in CTFE, in Miri, and on

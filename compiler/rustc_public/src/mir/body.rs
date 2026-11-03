@@ -515,6 +515,8 @@ pub struct CopyNonOverlapping {
 pub enum NonDivergingIntrinsic {
     Assume(Operand),
     CopyNonOverlapping(CopyNonOverlapping),
+    /// [LLM-generated] CHERI M5r: end of a borrowck loan (no effect on execution).
+    LoanEnd(u64),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

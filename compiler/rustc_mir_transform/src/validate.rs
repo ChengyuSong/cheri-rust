@@ -1526,6 +1526,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                     );
                 }
             }
+            StatementKind::Intrinsic(NonDivergingIntrinsic::LoanEnd(_)) => {}
             StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(op)) => {
                 let ty = op.ty(&self.body.local_decls, self.tcx);
                 if !ty.is_bool() {

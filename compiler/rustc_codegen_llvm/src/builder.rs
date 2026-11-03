@@ -498,6 +498,18 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             bundles.push(p);
         }
 
+        // M5r: a pending target-neutral memory-annotation bundle.
+        let mem_bundle = self
+            .cx
+            .mem_pending_bundle
+            .borrow_mut()
+            .take()
+            .map(|(tag, ops)| llvm::OperandBundleBox::new(tag, &ops));
+        if let Some(b) = mem_bundle.as_ref().map(|b| b.as_ref()) {
+            bundles.push(b);
+        }
+        let mem_last_use = self.cx.mem_pending_last_use.borrow_mut().take();
+
         let invoke = unsafe {
             llvm::LLVMBuildInvokeWithOperandBundles(
                 self.llbuilder,
@@ -514,6 +526,9 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         };
         if let Some(fn_abi) = fn_abi {
             fn_abi.apply_attrs_callsite(self, invoke);
+        }
+        if let Some(loans) = mem_last_use {
+            self.mem_last_use(invoke, &loans);
         }
         invoke
     }
@@ -977,6 +992,186 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 UNNAMED,
                 GEPNoWrapFlags::default(),
             )
+        }
+    }
+
+    fn mem_claim(&mut self, ptr: &'ll Value, bytes: &'ll Value, flags: u64) -> &'ll Value {
+        if mem_off("claim") || mem_off(&format!("claim:{}", flags & 0xff)) {
+            return ptr;
+        }
+        let i64t = self.type_i64();
+        let bytes = if self.val_ty(bytes) == i64t { bytes } else { self.intcast(bytes, i64t, false) };
+        let flags = self.cx.const_u64(flags);
+        self.call_intrinsic("llvm.mem.claim", &[self.val_ty(ptr)], &[ptr, bytes, flags])
+    }
+
+    fn mem_fact(&mut self, tag: &'static str, ops: &[&'ll Value]) {
+        if mem_off("fact") {
+            return;
+        }
+        let (ty, f) = self.cx.get_intrinsic("llvm.mem.fact".into(), &[]);
+        let bundle = llvm::OperandBundleBox::new(tag, ops);
+        let bundles = [bundle.as_ref()];
+        unsafe {
+            llvm::LLVMBuildCallWithOperandBundles(
+                self.llbuilder,
+                ty,
+                f,
+                std::ptr::null(),
+                0,
+                bundles.as_ptr(),
+                bundles.len() as c_uint,
+                c"".as_ptr(),
+            );
+        }
+    }
+
+    fn set_next_call_mem_bundle(&mut self, tag: &'static str, ops: &[&'ll Value]) {
+        if mem_off(tag) {
+            return;
+        }
+        *self.cx.mem_pending_bundle.borrow_mut() = Some((tag, ops.to_vec()));
+    }
+
+    fn set_next_call_mem_last_use(&mut self, loans: &[u64]) {
+        *self.cx.mem_pending_last_use.borrow_mut() = Some(loans.to_vec());
+    }
+
+    fn mem_guard(&mut self, inst: &'ll Value, site: u64) {
+        if mem_off("guard") || unsafe { llvm::LLVMIsAInstruction(inst) }.is_none() {
+            return;
+        }
+        let k = self.cx.get_md_kind_id("mem.guard");
+        let v = llvm::LLVMValueAsMetadata(self.cx.const_u64(site));
+        self.cx.set_metadata_node(inst, k, &[v]);
+    }
+
+    fn mem_last_use(&mut self, inst: &'ll Value, loans: &[u64]) {
+        if loans.is_empty() || mem_off("last_use") || unsafe { llvm::LLVMIsAInstruction(inst) }.is_none() {
+            return;
+        }
+        let k = self.cx.get_md_kind_id("mem.last_use");
+        let md: Vec<_> =
+            loans.iter().map(|&l| llvm::LLVMValueAsMetadata(self.cx.const_u64(l))).collect();
+        self.cx.set_metadata_node(inst, k, &md);
+    }
+
+    fn mem_mark(&mut self) -> Option<&'ll Value> {
+        unsafe { llvm::LLVMGetLastInstruction(llvm::LLVMGetInsertBlock(self.llbuilder)) }
+    }
+
+    fn mem_last_use_first_since(&mut self, mark: Option<&'ll Value>, loans: &[u64]) -> bool {
+        // Forward only: the carrier must be at or after the loan-end point on this path.
+        let found = unsafe {
+            let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let mut cur = match mark {
+                Some(m) if std::ptr::eq(llvm::LLVMGetInstructionParent(m), bb) => {
+                    llvm::LLVMGetNextInstruction(m)
+                }
+                _ => llvm::LLVMGetFirstInstruction(bb),
+            };
+            let mut found = None;
+            while let Some(i) = cur {
+                let ok = if llvm::LLVMIsALoadInst(i).is_some() || llvm::LLVMIsAStoreInst(i).is_some() {
+                    true
+                } else if llvm::LLVMIsACallInst(i).is_some() {
+                    match llvm::LLVMGetCalledValue(i) {
+                        Some(f) => {
+                            let n = llvm::get_value_name(f);
+                            !n.starts_with(b"llvm.")
+                                || n.starts_with(b"llvm.memcpy")
+                                || n.starts_with(b"llvm.memmove")
+                                || n.starts_with(b"llvm.memset")
+                        }
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+                if ok {
+                    found = Some(i);
+                    break;
+                }
+                cur = llvm::LLVMGetNextInstruction(i);
+            }
+            found
+        };
+        match found {
+            Some(i) => {
+                self.mem_last_use(i, loans);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn mem_last_use_since(
+        &mut self,
+        mark: Option<&'ll Value>,
+        ptr: &'ll Value,
+        loans: &[u64],
+    ) -> bool {
+        // The last load/store/call emitted since `mark` in the current block whose pointer
+        // operand is `ptr` (through GEPs and claims). If statement codegen left the block,
+        // nothing is tagged (fail-safe: a missing last use only loses an invalidation).
+        let last = unsafe {
+            let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let mut cur = match mark {
+                Some(m) => {
+                    if !std::ptr::eq(llvm::LLVMGetInstructionParent(m), bb) {
+                        return false;
+                    }
+                    llvm::LLVMGetNextInstruction(m)
+                }
+                None => llvm::LLVMGetFirstInstruction(bb),
+            };
+            let is_claim = |v: &'ll Value| -> bool {
+                llvm::LLVMIsACallInst(v).is_some()
+                    && llvm::LLVMGetCalledValue(v)
+                        .map(|f| llvm::get_value_name(f).starts_with(b"llvm.mem.claim"))
+                        .unwrap_or(false)
+            };
+            // Whether `v` is `ptr` or derived from it through GEPs / claims.
+            let derives = |mut v: &'ll Value| -> bool {
+                for _ in 0..16 {
+                    if std::ptr::eq(v, ptr) {
+                        return true;
+                    }
+                    if llvm::LLVMIsAGetElementPtrInst(v).is_some() || is_claim(v) {
+                        v = llvm::LLVMGetOperand(v, 0).unwrap();
+                        continue;
+                    }
+                    break;
+                }
+                false
+            };
+            let mut last = None;
+            while let Some(i) = cur {
+                let uses = if llvm::LLVMIsALoadInst(i).is_some() {
+                    derives(llvm::LLVMGetOperand(i, 0).unwrap())
+                } else if llvm::LLVMIsAStoreInst(i).is_some() {
+                    derives(llvm::LLVMGetOperand(i, 1).unwrap())
+                } else if llvm::LLVMIsACallInst(i).is_some() && !is_claim(i) {
+                    let n = llvm::LLVMGetNumArgOperands(i);
+                    (0..n).any(|a| {
+                        llvm::LLVMGetOperand(i, a).map(|o| derives(o)).unwrap_or(false)
+                    })
+                } else {
+                    false
+                };
+                if uses {
+                    last = Some(i);
+                }
+                cur = llvm::LLVMGetNextInstruction(i);
+            }
+            last
+        };
+        match last {
+            Some(i) => {
+                self.mem_last_use(i, loans);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1521,6 +1716,18 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             bundles.push(p);
         }
 
+        // M5r: a pending target-neutral memory-annotation bundle.
+        let mem_bundle = self
+            .cx
+            .mem_pending_bundle
+            .borrow_mut()
+            .take()
+            .map(|(tag, ops)| llvm::OperandBundleBox::new(tag, &ops));
+        if let Some(b) = mem_bundle.as_ref().map(|b| b.as_ref()) {
+            bundles.push(b);
+        }
+        let mem_last_use = self.cx.mem_pending_last_use.borrow_mut().take();
+
         let call = unsafe {
             llvm::LLVMBuildCallWithOperandBundles(
                 self.llbuilder,
@@ -1536,6 +1743,9 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
 
         if let Some(fn_abi) = fn_abi {
             fn_abi.apply_attrs_callsite(self, call);
+        }
+        if let Some(loans) = mem_last_use {
+            self.mem_last_use(call, &loans);
         }
         call
     }
@@ -2231,4 +2441,18 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
     ) {
         self.call_intrinsic("llvm.instrprof.increment", &[], &[fn_name, hash, num_counters, index]);
     }
+}
+
+/// [LLM-generated] M5r R1 research knob (untracked, attribution only): `MEM_ANNOT_OFF` is a
+/// comma list of marker kinds not to emit: `claim`, `claim:<kind>`, `fact`, `mem.check`,
+/// `mem.free`, `guard`, `last_use`.
+fn mem_off(kind: &str) -> bool {
+    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| {
+        std::env::var("MEM_ANNOT_OFF")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default()
+    })
+    .iter()
+    .any(|k| k == kind)
 }

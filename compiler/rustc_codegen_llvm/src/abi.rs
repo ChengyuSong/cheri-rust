@@ -16,7 +16,8 @@ use rustc_middle::ty::layout::LayoutOf;
 use rustc_session::{Session, config};
 use rustc_span::bug;
 use rustc_target::callconv::{
-    ArgAbi, ArgAttribute, ArgAttributes, ArgExtension, CastTarget, FnAbi, IndirectMode, PassMode,
+    ArgAbi, ArgAttribute, ArgAttributes, ArgExtension, CastTarget, CheriRangeLen, FnAbi, IndirectMode,
+    PassMode,
 };
 use rustc_target::spec::{Arch, SanitizerSet};
 use smallvec::SmallVec;
@@ -78,6 +79,17 @@ fn get_attrs<'ll>(this: &ArgAttributes, cx: &CodegenCx<'ll, '_>) -> SmallVec<[&'
         ArgExtension::Sext => attrs.push(llvm::AttributeKind::SExt.create_attr(cx.llcx)),
     }
 
+    // CHERI M2 (local prototype): semantic fact for CheriSkipNarrow, emitted at every opt level.
+    if regular.contains(ArgAttribute::AllocInbounds) {
+        attrs.push(llvm::CreateAttrString(cx.llcx, "mem.alloc_inbounds"));
+    }
+    // CHERI M3.2: `valid_box`'s allocator family.
+    if regular.contains(ArgAttribute::BoxFamily) {
+        attrs.push(llvm::CreateAttrStringValue(cx.llcx, "mem.box_family", "__rust_alloc"));
+    }
+    if regular.contains(ArgAttribute::CStr) {
+        attrs.push(llvm::CreateAttrString(cx.llcx, "mem.cstr"));
+    }
     // Only apply remaining attributes when optimizing
     if cx.sess().opts.optimize != config::OptLevel::No {
         let deref = this.pointee_size.bytes();
@@ -96,10 +108,14 @@ fn get_attrs<'ll>(this: &ArgAttributes, cx: &CodegenCx<'ll, '_>) -> SmallVec<[&'
                 attrs.push(llattr.create_attr(cx.llcx));
             }
         }
-        for (attr, llattr) in CAPTURES_ATTRIBUTES {
-            if regular.contains(attr) {
-                attrs.push(llattr.create_attr(cx.llcx));
-                break;
+        if regular.contains(ArgAttribute::CapturesRetBorrow) {
+            attrs.push(llvm::AttributeKind::CapturesRetBorrow.create_attr(cx.llcx));
+        } else {
+            for (attr, llattr) in CAPTURES_ATTRIBUTES {
+                if regular.contains(attr) {
+                    attrs.push(llattr.create_attr(cx.llcx));
+                    break;
+                }
             }
         }
     } else if cx.tcx.sess.sanitizers().contains(SanitizerSet::MEMORY) {
@@ -480,6 +496,50 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
         }
         attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &{ func_attrs });
 
+        // CHERI M3.2: LLVM index of each Rust argument's first part, for `"mem.range"`.
+        let llidx = cheri_llvm_arg_starts(self);
+        let cheri_range = |attrs: &ArgAttributes,
+                           place: AttributePlace,
+                           pair_next: Option<u32>,
+                           ty: Ty<'tcx>| {
+            let Some((len, size)) = attrs.cheri.get_range() else { return };
+            // A raw `(ptr, len)` contract: the element is the pointee.
+            let Some(size) = size.or_else(|| ty.builtin_deref(true).map(|p| cx.layout_of(p).size))
+            else {
+                return;
+            };
+            let len_idx = match len {
+                CheriRangeLen::PairNext => pair_next,
+                CheriRangeLen::Arg(a) => llidx.get(a as usize).copied().flatten(),
+            };
+            if let Some(li) = len_idx {
+                let v = format!("{li}:{}", size.bytes());
+                attributes::apply_to_llfn(
+                    llfn,
+                    place,
+                    &[llvm::CreateAttrStringValue(cx.llcx, "mem.range", &v)],
+                );
+            }
+        };
+        let cheri_len_range = |attrs: &ArgAttributes, place: AttributePlace, scalar: rustc_abi::Scalar| {
+            let Some(elem) = attrs.cheri.get_len_elem().map(|e| e.bytes()) else { return };
+            if cx.sess().opts.optimize == config::OptLevel::No {
+                return;
+            }
+            if let Primitive::Int(int, false) = scalar.primitive() {
+                let max = int.signed_max() as u64 / elem;
+                attributes::apply_to_llfn(
+                    llfn,
+                    place,
+                    &[llvm::CreateRangeAttr(
+                        cx.llcx,
+                        scalar.in_memory_size(cx),
+                        rustc_abi::WrappingRange { start: 0, end: u128::from(max) },
+                    )],
+                );
+            }
+        };
+
         let mut i = 0;
         let mut apply = |attrs: &ArgAttributes| {
             attrs.apply_attrs_to_llfn(llvm::AttributePlace::Argument(i), cx, llfn);
@@ -515,6 +575,7 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                 if let BackendRepr::Scalar(scalar) = self.ret.layout.backend_repr {
                     apply_range_attr(llvm::AttributePlace::ReturnValue, scalar);
                 }
+                cheri_range(attrs, llvm::AttributePlace::ReturnValue, None, self.ret.layout.ty);
             }
             PassMode::Indirect { attrs, meta_attrs: _, address_space: _, mode } => {
                 assert!(*mode == IndirectMode::Pointer);
@@ -572,8 +633,13 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                 PassMode::Direct(attrs) => {
                     let i = apply(attrs);
                     if let BackendRepr::Scalar(scalar) = arg.layout.backend_repr {
-                        apply_range_attr(llvm::AttributePlace::Argument(i), scalar);
+                        if attrs.cheri.get_len_elem().is_some() {
+                            cheri_len_range(attrs, llvm::AttributePlace::Argument(i), scalar);
+                        } else {
+                            apply_range_attr(llvm::AttributePlace::Argument(i), scalar);
+                        }
                     }
+                    cheri_range(attrs, llvm::AttributePlace::Argument(i), None, arg.layout.ty);
                 }
                 PassMode::Indirect {
                     attrs,
@@ -603,6 +669,7 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                 PassMode::Pair(a, b) => {
                     let i = apply(a);
                     let ii = apply(b);
+                    cheri_range(a, llvm::AttributePlace::Argument(i), Some(ii), arg.layout.ty);
                     if let BackendRepr::ScalarPair { a: scalar_a, b: scalar_b, b_offset: _ } =
                         arg.layout.backend_repr
                     {
@@ -639,6 +706,17 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                     apply(&cast.attrs);
                 }
             }
+        }
+
+        // CHERI M3.2: canonical type-contract record for the M3.4 manifest.
+        if let Some(instance) = instance
+            && let Some(canon) = cheri_contract_canon(cx, self, instance, &llidx)
+        {
+            attributes::apply_to_llfn(
+                llfn,
+                llvm::AttributePlace::Function,
+                &[llvm::CreateAttrStringValue(cx.llcx, "mem.contract", &canon)],
+            );
         }
 
         // If the declaration has an associated instance, compute extra attributes based on that.
@@ -851,4 +929,72 @@ pub(crate) fn to_llvm_calling_convention(sess: &Session, abi: CanonAbi) -> llvm:
             X86Call::Win64 => llvm::X86_64_Win64,
         },
     }
+}
+
+/// CHERI M3.2 (local prototype, LLM-generated): the LLVM parameter index of each
+/// Rust argument's first part (`None` for ignored arguments). Mirrors the index
+/// bookkeeping of `apply_attrs_llfn`.
+fn cheri_llvm_arg_starts<'tcx>(fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Vec<Option<u32>> {
+    let mut i: u32 = if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
+    let mut out = Vec::with_capacity(fn_abi.args.len());
+    for arg in fn_abi.args.iter() {
+        let n = match &arg.mode {
+            PassMode::Ignore => 0,
+            PassMode::Direct(_) => 1,
+            PassMode::Pair(..) => 2,
+            PassMode::Indirect { meta_attrs: Some(_), .. } => 2,
+            PassMode::Indirect { meta_attrs: None, .. } => 1,
+            PassMode::Cast { pad_i32_count, .. } => *pad_i32_count as u32 + 1,
+        };
+        out.push(if n == 0 { None } else { Some(i) });
+        i += n;
+    }
+    out
+}
+
+/// CHERI M3.2: the `#[rustc_mem_contract]` contracts of `instance` in the C
+/// mirror's canonical form (`"slice(0,1,8,8);ref(ret,1,1);ret_borrows(0)"`,
+/// LLVM parameter indices), or `None`.
+fn cheri_contract_canon<'tcx>(
+    cx: &CodegenCx<'_, 'tcx>,
+    fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+    instance: ty::Instance<'tcx>,
+    llidx: &[Option<u32>],
+) -> Option<String> {
+    use rustc_attr_ir::find_attr;
+    if !cx.tcx.sess.target.is_like_cheri {
+        return None;
+    }
+    let ty::InstanceKind::Item(def_id) = instance.def else { return None };
+    let canons = find_attr!(cx.tcx, def_id, RustcMemContract(v) => v.clone())?;
+    let idx = |a: &str| -> Option<String> {
+        if a == "ret" {
+            return Some("ret".into());
+        }
+        let r: usize = a.parse().ok()?;
+        llidx.get(r).copied().flatten().map(|i| i.to_string())
+    };
+    let mut out = vec![];
+    for canon in canons.iter() {
+        for item in canon.as_str().split(';').filter(|s| !s.is_empty()) {
+            let (kind, rest) = item.split_once('(')?;
+            let args: Vec<&str> = rest.trim_end_matches(')').split(',').collect();
+            let mut f = vec![idx(args.first()?)?];
+            if kind == "slice" || kind == "slice_mut" {
+                f.push(idx(args.get(1)?)?);
+            }
+            if matches!(kind, "slice" | "slice_mut" | "ref" | "ref_mut" | "box") {
+                let arg = match args[0] {
+                    "ret" => &fn_abi.ret,
+                    a => fn_abi.args.get(a.parse::<usize>().ok()?)?,
+                };
+                let pointee = arg.layout.ty.builtin_deref(true)?;
+                let l = cx.layout_of(pointee);
+                f.push(l.size.bytes().to_string());
+                f.push(l.align.abi.bytes().to_string());
+            }
+            out.push(format!("{kind}({})", f.join(",")));
+        }
+    }
+    (!out.is_empty()).then(|| out.join(";"))
 }

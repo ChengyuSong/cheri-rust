@@ -481,6 +481,13 @@ pub enum NonDivergingIntrinsic<'tcx> {
     /// **Needs clarification**: Is this typed or not, ie is there a typed load and store involved?
     /// I vaguely remember Ralf saying somewhere that he thought it should not be.
     CopyNonOverlapping(CopyNonOverlapping<'tcx>),
+
+    /// [LLM-generated] CHERI M5r R3 (D17): end of a borrowck loan. From this point on no
+    /// reference derived from loan `id` is live (borrowck's out-of-scope point, recorded
+    /// right after borrowck and carried through the MIR passes). It has no effect on
+    /// execution; codegen turns it into `!mem.last_use` on the preceding (or next) memory
+    /// access. Dropping it is always sound (fail-safe: no early invalidation).
+    LoanEnd(u64),
 }
 
 /// Describes whether this operand use performs a retag.

@@ -353,6 +353,55 @@ pub trait BuilderMethods<'a, 'tcx>:
     );
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value;
+
+    // M5r (RELAYER-DESIGN.md): target-neutral memory-annotation markers. rustc only
+    // passes information here; every CHERI decision is made by the late LLVM passes.
+    // Backends without the vocabulary ignore the markers.
+
+    /// `%q = llvm.mem.claim(ptr, bytes, flags)`: `ptr` is valid for `bytes` bytes; later
+    /// uses must go through the returned value. Default: no claim (returns `ptr`).
+    fn mem_claim(&mut self, ptr: Self::Value, _bytes: Self::Value, _flags: u64) -> Self::Value {
+        ptr
+    }
+
+    /// `call void @llvm.mem.fact() [ "<tag>"(ops) ]`.
+    fn mem_fact(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
+
+    /// Attach the operand bundle `"<tag>"(ops)` to the next call/invoke built.
+    fn set_next_call_mem_bundle(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
+
+    /// Attach `!mem.last_use !{loans}` to the next call/invoke built.
+    fn set_next_call_mem_last_use(&mut self, _loans: &[u64]) {}
+
+    /// `!mem.guard !{site}` on an access-address instruction (no-op for constants).
+    fn mem_guard(&mut self, _inst: Self::Value, _site: u64) {}
+
+    /// `!mem.last_use !{loans}` on a load/store/call.
+    fn mem_last_use(&mut self, _inst: Self::Value, _loans: &[u64]) {}
+
+    /// The last instruction of the current block (a position mark).
+    fn mem_mark(&mut self) -> Option<Self::Value> {
+        None
+    }
+
+    /// Tag the last load/store/call emitted after `mark` whose pointer is `ptr` with
+    /// `!mem.last_use !{loans}`. Returns whether one was tagged.
+    fn mem_last_use_since(
+        &mut self,
+        _mark: Option<Self::Value>,
+        _ptr: Self::Value,
+        _loans: &[u64],
+    ) -> bool {
+        false
+    }
+
+    /// [LLM-generated] M5r R3 (D17): tag the *first* load/store/call (not an annotation or
+    /// other `llvm.*` intrinsic except memcpy/memmove/memset) emitted after `mark` in the
+    /// current block (from the block start if `mark` is `None` or in another block) with
+    /// `!mem.last_use !{loans}`. Returns whether one was tagged.
+    fn mem_last_use_first_since(&mut self, _mark: Option<Self::Value>, _loans: &[u64]) -> bool {
+        false
+    }
     fn inbounds_gep(
         &mut self,
         ty: Self::Type,

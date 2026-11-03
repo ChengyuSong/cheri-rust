@@ -21,7 +21,8 @@ use rustc_hir::def_id::LocalDefId;
 use rustc_index::IndexVec;
 use rustc_middle::mir::{
     AnalysisPhase, Body, CallSource, ClearCrossCrate, ConstOperand, ConstQualifs, LocalDecl,
-    MirPhase, Operand, Place, ProjectionElem, Promoted, RuntimePhase, Rvalue, START_BLOCK,
+    MirPhase, NonDivergingIntrinsic, Operand, Place, ProjectionElem, Promoted, RuntimePhase, Rvalue,
+    START_BLOCK,
     SourceInfo, Statement, StatementKind, TerminatorKind, WithRetag,
 };
 use rustc_middle::query;
@@ -587,9 +588,43 @@ fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &
         _ => {}
     }
 
+    insert_cheri_loan_ends(tcx, def, &mut body);
+
     run_analysis_to_runtime_passes(tcx, &mut body);
 
     tcx.alloc_steal_mir(body)
+}
+
+/// [LLM-generated] CHERI M5r R3 (D17): turn the loan-end points borrowck recorded for this
+/// body (in `mir_promoted` locations, which this body still has) into
+/// `NonDivergingIntrinsic::LoanEnd` statements in front of the statement (or terminator)
+/// at each point. The MIR passes then carry them like any other statement; the inliner
+/// re-keys inlined ones. Only facts: what to invalidate is decided late in LLVM.
+fn insert_cheri_loan_ends<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId, body: &mut Body<'tcx>) {
+    let Some(mut ends) = tcx.cheri_loan_ends.lock().remove(&def) else { return };
+    if body.tainted_by_errors.is_some() {
+        return;
+    }
+    // Insert from the back of each block so earlier indices stay valid.
+    ends.sort_by(|a, b| (b.0.block, b.0.statement_index, b.1).cmp(&(a.0.block, a.0.statement_index, a.1)));
+    for (loc, id) in ends {
+        let Some(data) = body.basic_blocks_mut().get_mut(loc.block) else { continue };
+        if loc.statement_index > data.statements.len() {
+            continue;
+        }
+        let source_info = if loc.statement_index < data.statements.len() {
+            data.statements[loc.statement_index].source_info
+        } else {
+            data.terminator().source_info
+        };
+        data.statements.insert(
+            loc.statement_index,
+            Statement::new(
+                source_info,
+                StatementKind::Intrinsic(Box::new(NonDivergingIntrinsic::LoanEnd(id))),
+            ),
+        );
+    }
 }
 
 // Made public so that `mir_drops_elaborated_and_const_checked` can be overridden

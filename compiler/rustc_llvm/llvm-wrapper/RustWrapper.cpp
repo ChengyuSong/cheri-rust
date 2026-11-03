@@ -290,6 +290,7 @@ enum class LLVMRustAttributeKind {
   SanitizeRealtimeBlocking = 48,
   Convergent = 49,
   NoFree = 50,
+  CapturesRetBorrow = 51,
 };
 
 static Attribute::AttrKind fromRust(LLVMRustAttributeKind Kind) {
@@ -381,6 +382,7 @@ static Attribute::AttrKind fromRust(LLVMRustAttributeKind Kind) {
   case LLVMRustAttributeKind::CapturesAddress:
   case LLVMRustAttributeKind::CapturesReadOnly:
   case LLVMRustAttributeKind::CapturesNone:
+  case LLVMRustAttributeKind::CapturesRetBorrow:
     report_fatal_error("Should be handled separately");
   case LLVMRustAttributeKind::SanitizeRealtimeNonblocking:
     return Attribute::SanitizeRealtime;
@@ -459,6 +461,13 @@ LLVMRustCreateAttrNoValue(LLVMContextRef C, LLVMRustAttributeKind RustAttr) {
   if (RustAttr == LLVMRustAttributeKind::CapturesAddress) {
     return wrap(Attribute::getWithCaptureInfo(
         *unwrap(C), CaptureInfo(CaptureComponents::Address)));
+  }
+  if (RustAttr == LLVMRustAttributeKind::CapturesRetBorrow) {
+    // CHERI M3.2 (local prototype): a borrow tied to the return value.
+    return wrap(Attribute::getWithCaptureInfo(
+        *unwrap(C), CaptureInfo(CaptureComponents::Address,
+                                CaptureComponents::Address |
+                                    CaptureComponents::Provenance)));
   }
   if (RustAttr == LLVMRustAttributeKind::CapturesReadOnly) {
     return wrap(Attribute::getWithCaptureInfo(

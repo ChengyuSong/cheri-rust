@@ -129,6 +129,8 @@ impl AttributeKind {
             RustcDenyExplicitImpl => No,
             RustcDeprecatedSafe2024 { .. } => Yes,
             RustcDiagnosticItem(..) => Yes,
+            RustcMemContract(..) => Yes,
+            RustcMemContractSite(..) => No, // local site only
             RustcDoNotConstCheck => Yes,
             RustcDocPrimitive(..) => Yes,
             RustcDummy => No,

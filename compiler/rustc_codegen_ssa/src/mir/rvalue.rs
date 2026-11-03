@@ -622,7 +622,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         })
                     }
                     mir::CastKind::Transmute | mir::CastKind::BoxDerefTransmute | mir::CastKind::Subtype => {
-                        self.codegen_transmute_operand(bx, operand, cast)
+                        let val = self.codegen_transmute_operand(bx, operand, cast);
+                        // M5r: transmute raw -> ref/slice/Box is a conversion: claim.
+                        let op = OperandRef { val, layout: cast, move_annotation: None };
+                        return self.mem_transmute_claim(bx, operand.layout.ty, op);
                     }
                 };
                 OperandRef { val, layout: cast, move_annotation: None }
@@ -633,6 +636,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     Ty::new_ref(tcx, tcx.lifetimes.re_erased, ty, bk.to_mutbl_lossy())
                 };
                 let op = self.codegen_place_to_pointer(bx, place, mk_ref);
+                // M5r: `&*raw` / `&mut *raw` is a raw -> typed conversion: claim.
+                let op = self.mem_raw_ref_claim(bx, place, op);
                 if self.cx.tcx().sess.opts.unstable_opts.codegen_emit_retag.is_some() {
                     self.codegen_retag_operand(bx, op, false)
                 } else {

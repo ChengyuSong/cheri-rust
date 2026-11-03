@@ -816,7 +816,7 @@ pub(crate) fn check_intrinsic_type(
 
         // CHERI-specific intrinsics
         sym::cheri_address_get => (1, 0, vec![Ty::new_imm_ptr(tcx, param(0))], tcx.types.usize),
-        sym::cheri_bounds_narrow | sym::cheri_bounds_narrow_exact => (
+        sym::cheri_bounds_narrow | sym::cheri_bounds_narrow_exact | sym::cheri_contract_narrow => (
             1,
             0,
             vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.usize],
