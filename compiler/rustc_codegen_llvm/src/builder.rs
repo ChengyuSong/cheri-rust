@@ -1142,11 +1142,18 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         let found = unsafe {
             let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
             let mut cur = llvm::LLVMGetLastInstruction(bb);
-            // Skip the terminator (a branch: the end point is before it).
+            // Skip the terminator (a branch: the end point is before it). R8 (D62): also a
+            // `ret` (a loan end reached only at the return; the block end hook runs after
+            // the terminator was emitted).
+            let mut at_ret = false;
             if let Some(t) = cur
                 && llvm::LLVMIsATerminatorInst(t).is_some()
             {
-                if llvm::LLVMIsABranchInst(t).is_none() && llvm::LLVMIsASwitchInst(t).is_none() {
+                at_ret = llvm::LLVMIsAReturnInst(t).is_some();
+                if llvm::LLVMIsABranchInst(t).is_none()
+                    && llvm::LLVMIsASwitchInst(t).is_none()
+                    && !at_ret
+                {
                     return false;
                 }
                 cur = llvm::LLVMGetPreviousInstruction(t);
@@ -1174,6 +1181,38 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                     break;
                 }
                 cur = llvm::LLVMGetPreviousInstruction(i);
+            }
+            // R8 (D62): a returning block without a carrier, entered by an unconditional
+            // `br` from the block laid out before it (the call's continuation block): that
+            // block's last carrier is followed only by the branch, so the loan ends there on
+            // that path. Other predecessors, if any, keep no end (fail-safe).
+            if found.is_none()
+                && at_ret
+                && let Some(prev) = llvm::LLVMGetPreviousBasicBlock(bb)
+                && let Some(t) = llvm::LLVMGetBasicBlockTerminator(prev)
+                && llvm::LLVMIsABranchInst(t).is_some()
+                && llvm::LLVMGetNumOperands(t) == 1
+                && llvm::LLVMGetOperand(t, 0)
+                    .is_some_and(|d| std::ptr::eq(d, llvm::LLVMBasicBlockAsValue(bb)))
+            {
+                let mut c = llvm::LLVMGetPreviousInstruction(t);
+                while let Some(i) = c {
+                    if llvm::LLVMIsALoadInst(i).is_some()
+                        || llvm::LLVMIsAStoreInst(i).is_some()
+                        || (llvm::LLVMIsACallInst(i).is_some()
+                            && llvm::LLVMGetCalledValue(i).is_none_or(|f| {
+                                let n = llvm::get_value_name(f);
+                                !n.starts_with(b"llvm.")
+                                    || n.starts_with(b"llvm.memcpy")
+                                    || n.starts_with(b"llvm.memmove")
+                                    || n.starts_with(b"llvm.memset")
+                            }))
+                    {
+                        found = Some(i);
+                        break;
+                    }
+                    c = llvm::LLVMGetPreviousInstruction(i);
+                }
             }
             found
         };
