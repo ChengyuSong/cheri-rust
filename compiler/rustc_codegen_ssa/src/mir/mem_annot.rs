@@ -35,8 +35,9 @@ use super::{FunctionCx, LocalRef};
 use crate::traits::*;
 
 // Claim flags (llvm/IR/MemAnnot.h `ClaimKind` / `ClaimFlags`).
-/// [LLM-generated] R5 (D35): bit 63 of a `LoanEnd` id marks a loan start (must match
-/// `rustc_borrowck` and the MIR inliner).
+/// [LLM-generated] R5 (D35): bit 63 marked a loan start in the R5 `LoanEnd` encoding. Since
+/// R6 (D43) loan starts are `NonDivergingIntrinsic::LoanStart` statements and the bit only
+/// exists in the borrowck side table; R7 (D56): kept here only to mask ids defensively.
 pub(crate) const CHERI_LOAN_START: u64 = 1 << 63;
 pub(crate) const CK_REF: u64 = 0;
 pub(crate) const CK_SLICE: u64 = 1;

@@ -606,10 +606,12 @@ fn borrowck_check_region_constraints<'diag, 'tcx>(
     result
 }
 
-/// [LLM-generated] CHERI M5r R5 (D35): a `LoanEnd` id with this bit set marks the *start*
-/// of the loan (in front of its `Rvalue::Ref`) instead of its end. The same constant is
-/// used by the MIR inliner (`rustc_mir_transform`) and codegen (`rustc_codegen_ssa`);
-/// it rides in the existing `LoanEnd` statement so that `rustc_middle` is unchanged.
+/// [LLM-generated] CHERI M5r R5 (D35), R6 (D43), R7 (D56): an id with this bit set in the
+/// loan side table marks the *start* of the loan (in front of its `Rvalue::Ref`) instead of
+/// its end. The bit is internal to the borrowck -> `rustc_mir_transform` side table only:
+/// since R6 (D43) the MIR pass emits a `NonDivergingIntrinsic::LoanStart(id)` statement for
+/// such an entry (and a `LoanEnd` for the others), so no MIR statement and no codegen id
+/// carries the bit (codegen only masks it defensively).
 const CHERI_LOAN_START: u64 = 1 << 63;
 
 /// [LLM-generated] CHERI M5r R3 (D17): borrowck's out-of-scope point of every real
