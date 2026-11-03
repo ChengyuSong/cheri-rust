@@ -1415,6 +1415,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.mem_stats.loan_starts_missed += 1;
         }
         self.mem_slot_pending = Some(self.mem_loan_key(id));
+        self.mem_slot_pending_age = 0;
     }
 
     /// Statement hook (before codegen): the loans whose reference this statement stores
@@ -1426,13 +1427,28 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// is contained in each).
     pub(crate) fn mem_slot_before(&mut self, stmt: &mir::Statement<'tcx>) -> Option<Vec<u64>> {
         let StatementKind::Assign(assign) = &stmt.kind else { return None };
+        self.mem_slot_pending_age += 1;
         let (place, rv) = &**assign;
         let in_mem = matches!(self.locals[place.local], LocalRef::Place(_))
             && !place.projection.iter().any(|e| matches!(e, PlaceElem::Deref));
         let ids = match rv {
             Rvalue::Ref(..) => vec![self.mem_slot_pending.take()?],
             Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _) if src.projection.is_empty() => {
-                let mut ids = self.mem_slot_loans.get(&src.local).cloned()?;
+                let mut ids = match self.mem_slot_loans.get(&src.local).cloned() {
+                    Some(ids) => ids,
+                    // [LLM-generated] R8 (D63): a reborrow that GVN turned into a copy of a
+                    // reference whose own loan is not known (e.g. it came from an inlined
+                    // `Index::index`): the copy right after the loan start (first
+                    // assignment since) carries that loan alone.
+                    None if self.cx.tcx().sess.opts.unstable_opts.cheri_slot_copy_start
+                        && self.mem_slot_pending.is_some()
+                        && self.mem_slot_pending_age == 1
+                        && self.mir.local_decls[src.local].ty.is_ref() =>
+                    {
+                        Vec::new()
+                    }
+                    None => return None,
+                };
                 if let Some(id) = self.mem_slot_pending.take() {
                     ids.push(id);
                 }
