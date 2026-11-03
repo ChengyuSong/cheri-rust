@@ -923,7 +923,7 @@ impl<'a, 'tcx> ResultsVisitor<'tcx, Borrowck<'a, 'tcx>> for MirBorrowckCtxt<'a, 
                     span,
                     "Unexpected CopyNonOverlapping, should only appear after lower_intrinsics",
                 ),
-                NonDivergingIntrinsic::LoanEnd(..) => {}
+                NonDivergingIntrinsic::LoanEnd(..) | NonDivergingIntrinsic::LoanStart(..) => {}
             },
             // Only relevant for mir typeck
             StatementKind::AscribeUserType(..) => {}

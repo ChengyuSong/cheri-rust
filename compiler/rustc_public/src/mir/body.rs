@@ -517,6 +517,8 @@ pub enum NonDivergingIntrinsic {
     CopyNonOverlapping(CopyNonOverlapping),
     /// [LLM-generated] CHERI M5r: end of a borrowck loan (no effect on execution).
     LoanEnd(u64),
+    /// [LLM-generated] CHERI M5r R6: start of a borrowck loan (no effect on execution).
+    LoanStart(u64),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

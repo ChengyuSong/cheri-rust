@@ -488,6 +488,11 @@ pub enum NonDivergingIntrinsic<'tcx> {
     /// execution; codegen turns it into `!mem.last_use` on the preceding (or next) memory
     /// access. Dropping it is always sound (fail-safe: no early invalidation).
     LoanEnd(u64),
+    /// [LLM-generated] CHERI M5r R6 (D35/D43): start of borrowck loan `id` (placed right
+    /// before the loan's `Rvalue::Ref`). No effect on execution; codegen tags the store of
+    /// the new reference with `!mem.loan !{id}` (the slot fact for loan-end invalidation).
+    /// Dropping it is always sound (the slot is then simply not a loan slot).
+    LoanStart(u64),
 }
 
 /// Describes whether this operand use performs a retag.

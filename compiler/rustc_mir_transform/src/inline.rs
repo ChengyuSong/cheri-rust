@@ -1274,15 +1274,14 @@ impl<'tcx> MutVisitor<'tcx> for Integrator<'_, 'tcx> {
         // [LLM-generated] CHERI M5r R3 (D17): a loan of an inlined body is a new loan per
         // inlined copy; re-key it with this copy's first new local (unique in the caller).
         if let StatementKind::Intrinsic(ndi) = &mut statement.kind
-            && let NonDivergingIntrinsic::LoanEnd(id) = &mut **ndi
+            && let NonDivergingIntrinsic::LoanEnd(id) | NonDivergingIntrinsic::LoanStart(id) =
+                &mut **ndi
         {
             use std::hash::{Hash, Hasher};
-            // R5 (D35): bit 63 marks a loan start; start and end of one loan stay paired.
-            const START: u64 = 1 << 63;
-            let flag = *id & START;
+            // R6 (D43): start and end of one loan get the same new key.
             let mut h = rustc_data_structures::fx::FxHasher::default();
-            (*id & !START, self.new_locals.start.index()).hash(&mut h);
-            *id = (h.finish() & !START) | flag;
+            (*id, self.new_locals.start.index()).hash(&mut h);
+            *id = h.finish();
         }
         self.super_statement(statement, location);
     }

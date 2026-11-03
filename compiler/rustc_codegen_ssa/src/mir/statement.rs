@@ -89,11 +89,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 self.codegen_coverage(bx, kind, statement.source_info.scope);
             }
             mir::StatementKind::Intrinsic(NonDivergingIntrinsic::LoanEnd(id)) => {
-                if id & super::mem_annot::CHERI_LOAN_START != 0 {
-                    self.mem_loan_start(id);
-                } else {
-                    self.mem_loan_end(bx, id);
-                }
+                self.mem_loan_end(bx, id);
+            }
+            mir::StatementKind::Intrinsic(NonDivergingIntrinsic::LoanStart(id)) => {
+                self.mem_loan_start(id);
             }
             mir::StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(ref op)) => {
                 let op_val = self.codegen_operand(bx, op);
