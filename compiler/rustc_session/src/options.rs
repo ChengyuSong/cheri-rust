@@ -2450,6 +2450,9 @@ options! {
          `!mem.guard`, `llvm.mem.claim`, `mem.alloc_inbounds` facts, `\"mem.free\"`, \
          `!mem.last_use`) for the late LLVM CHERI passes; rustc itself makes no CHERI \
          decision (default: yes; CHERI targets only)"),
+    cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
+        after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),
     cheri_slot_copy_start: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D63): a loan start followed directly by a copy of a \
         reference (a reborrow GVN turned into a copy) tags the copy's store with the loan \

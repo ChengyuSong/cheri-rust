@@ -1406,7 +1406,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// [LLM-generated] M5r R5 (D35): a loan start. The next statement, if it is the
     /// loan's `Rvalue::Ref` assigned into memory, tags the store of the reference with
     /// `!mem.loan !{id}` (the slot fact for the late CHERI pass's loan-end invalidation).
-    pub(crate) fn mem_loan_start(&mut self, id: u64) {
+    pub(crate) fn mem_loan_start(&mut self, id: u64, scope: mir::SourceScope) {
         if !self.mem_annotate() {
             return;
         }
@@ -1416,6 +1416,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
         self.mem_slot_pending = Some(self.mem_loan_key(id));
         self.mem_slot_pending_age = 0;
+        self.mem_slot_pending_scope = Some(scope);
     }
 
     /// Statement hook (before codegen): the loans whose reference this statement stores
@@ -1428,6 +1429,20 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     pub(crate) fn mem_slot_before(&mut self, stmt: &mir::Statement<'tcx>) -> Option<Vec<u64>> {
         let StatementKind::Assign(assign) = &stmt.kind else { return None };
         self.mem_slot_pending_age += 1;
+        // [LLM-generated] R8 (D64): a loan start pairs only with the assignment right
+        // after it, in the same source scope. With MIR inlining + GVN a start's own `Ref`
+        // can be folded away (e.g. `&self.filename` of an inlined `as_ptr`), and the R5
+        // "next `Ref` of the block" rule then tagged an unrelated later reference (seen on
+        // `Location::file()` in a panic handler: the slot was cleared while `fmt::Arguments`
+        // still used it). A start that does not pair is dropped (fail-safe: no clear).
+        if self.mem_slot_pending.is_some()
+            && self.cx.tcx().sess.opts.unstable_opts.cheri_slot_start_strict
+            && (self.mem_slot_pending_age != 1
+                || self.mem_slot_pending_scope != Some(stmt.source_info.scope))
+        {
+            self.mem_slot_pending = None;
+            self.mem_stats.loan_starts_missed += 1;
+        }
         let (place, rv) = &**assign;
         let in_mem = matches!(self.locals[place.local], LocalRef::Place(_))
             && !place.projection.iter().any(|e| matches!(e, PlaceElem::Deref));
