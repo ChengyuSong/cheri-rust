@@ -606,6 +606,12 @@ fn borrowck_check_region_constraints<'diag, 'tcx>(
     result
 }
 
+/// [LLM-generated] CHERI M5r R5 (D35): a `LoanEnd` id with this bit set marks the *start*
+/// of the loan (in front of its `Rvalue::Ref`) instead of its end. The same constant is
+/// used by the MIR inliner (`rustc_mir_transform`) and codegen (`rustc_codegen_ssa`);
+/// it rides in the existing `LoanEnd` statement so that `rustc_middle` is unchanged.
+const CHERI_LOAN_START: u64 = 1 << 63;
+
 /// [LLM-generated] CHERI M5r R3 (D17): borrowck's out-of-scope point of every real
 /// (non-fake) loan, keyed by `mir_promoted` location, stored in `tcx.cheri_loan_ends` for
 /// `mir_drops_elaborated_and_const_checked` to turn into `LoanEnd` markers. A loan that is
@@ -635,10 +641,33 @@ fn record_cheri_loan_ends<'tcx>(
     let base = h.finish();
     let _ = borrow_set;
     let mut v = Vec::new();
-    for (loc, n) in crate::dataflow::cheri_all_loans_out_of_scope(body, regioncx) {
+    let key = |n: usize| {
         let mut h = rustc_data_structures::fx::FxHasher::default();
         (base, n).hash(&mut h);
-        v.push((loc, h.finish()));
+        h.finish() & !CHERI_LOAN_START
+    };
+    let mut ended = rustc_data_structures::fx::FxHashSet::default();
+    for (loc, n) in crate::dataflow::cheri_all_loans_out_of_scope(body, regioncx) {
+        ended.insert(n);
+        v.push((loc, key(n)));
+    }
+    // [LLM-generated] CHERI M5r R5 (D35): the start of each loan that has an end, in
+    // front of its `Rvalue::Ref` (same ordinal as above). Codegen turns it into the
+    // slot fact `!mem.loan` on the store of the new reference, if it goes to memory.
+    let mut n = 0usize;
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
+        for (i, stmt) in data.statements.iter().enumerate() {
+            if let StatementKind::Assign(assign) = &stmt.kind
+                && let Rvalue::Ref(region, kind, _) = &assign.1
+                && !matches!(kind, BorrowKind::Fake(_))
+                && region.is_var()
+            {
+                if ended.contains(&n) {
+                    v.push((Location { block: bb, statement_index: i }, key(n) | CHERI_LOAN_START));
+                }
+                n += 1;
+            }
+        }
     }
     if std::env::var_os("MEM_ANNOT_DEBUG").is_some() {
         eprintln!("MEM-LOAN-ENDS {:?}: {} borrows, {} end points", def, borrow_set.len(), v.len());

@@ -1056,6 +1056,39 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         self.cx.set_metadata_node(inst, k, &md);
     }
 
+    fn mem_loan_slot_since(&mut self, mark: Option<&'ll Value>, loans: &[u64]) -> u32 {
+        if loans.is_empty() || mem_off("loan") {
+            return 0;
+        }
+        let k = self.cx.get_md_kind_id("mem.loan");
+        let md: Vec<_> =
+            loans.iter().map(|&l| llvm::LLVMValueAsMetadata(self.cx.const_u64(l))).collect();
+        let mut n = 0;
+        unsafe {
+            let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let mut cur = match mark {
+                Some(m) => {
+                    if !std::ptr::eq(llvm::LLVMGetInstructionParent(m), bb) {
+                        return 0; // statement codegen left the block: no fact (fail-safe)
+                    }
+                    llvm::LLVMGetNextInstruction(m)
+                }
+                None => llvm::LLVMGetFirstInstruction(bb),
+            };
+            while let Some(i) = cur {
+                if llvm::LLVMIsAStoreInst(i).is_some()
+                    && let Some(v) = llvm::LLVMGetOperand(i, 0)
+                    && self.cx.type_kind(self.cx.val_ty(v)) == TypeKind::Pointer
+                {
+                    self.cx.set_metadata_node(i, k, &md);
+                    n += 1;
+                }
+                cur = llvm::LLVMGetNextInstruction(i);
+            }
+        }
+        n
+    }
+
     fn mem_mark(&mut self) -> Option<&'ll Value> {
         unsafe { llvm::LLVMGetLastInstruction(llvm::LLVMGetInsertBlock(self.llbuilder)) }
     }

@@ -370,6 +370,11 @@ pub trait BuilderMethods<'a, 'tcx>:
     /// Attach the operand bundle `"<tag>"(ops)` to the next call/invoke built.
     fn set_next_call_mem_bundle(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
 
+    /// [LLM-generated] R5 (D35): `!mem.loan !{loans}` on every store of a pointer value
+    /// emitted since `mark` in the current block. Returns how many were tagged.
+    fn mem_loan_slot_since(&mut self, _mark: Option<Self::Value>, _loans: &[u64]) -> u32 {
+        0
+    }
     /// Attach `!mem.last_use !{loans}` to the next call/invoke built.
     fn set_next_call_mem_last_use(&mut self, _loans: &[u64]) {}
 

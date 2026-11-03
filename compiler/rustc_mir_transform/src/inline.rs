@@ -1277,9 +1277,12 @@ impl<'tcx> MutVisitor<'tcx> for Integrator<'_, 'tcx> {
             && let NonDivergingIntrinsic::LoanEnd(id) = &mut **ndi
         {
             use std::hash::{Hash, Hasher};
+            // R5 (D35): bit 63 marks a loan start; start and end of one loan stay paired.
+            const START: u64 = 1 << 63;
+            let flag = *id & START;
             let mut h = rustc_data_structures::fx::FxHasher::default();
-            (*id, self.new_locals.start.index()).hash(&mut h);
-            *id = h.finish();
+            (*id & !START, self.new_locals.start.index()).hash(&mut h);
+            *id = (h.finish() & !START) | flag;
         }
         self.super_statement(statement, location);
     }

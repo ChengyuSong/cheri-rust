@@ -1622,6 +1622,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
             // M5r: `!mem.guard` on a site's access, `!mem.last_use` on loan last uses.
             self.mem_loan_block_start(bb);
+            // R5 (D35): a loan start applies only to the next statement of its block.
+            if self.mem_slot_pending.take().is_some() {
+                self.mem_stats.loan_starts_missed += 1;
+            }
             let mut guard = self.mem_guards.remove(&bb);
             for (i, statement) in data.statements.iter().enumerate() {
                 let is_site = guard.is_some_and(|g| g.site.stmt == i);
@@ -1633,7 +1637,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     .at
                     .contains_key(&(bb, UseAt::Stmt(i)))
                     .then(|| bx.mem_mark());
+                // R5 (D35): `!mem.loan` on the store of a loan's new reference.
+                let slot = self.mem_slot_before(statement).map(|ids| (bx.mem_mark(), ids));
                 self.codegen_statement(bx, statement);
+                if let Some((smark, ids)) = slot {
+                    self.mem_slot_after(bx, statement, smark, ids);
+                }
                 if self.mem_loan_pending.is_some() {
                     self.mem_loan_flush(bx);
                 }
@@ -1653,7 +1662,19 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
             self.mem_last_use_term(bb);
             self.mem_loan_before_term(bx, data.terminator());
+            // R5: loan ends meant for a call that is lowered inline (an intrinsic such
+            // as `black_box`, no call to tag) go on the first carrier it emitted.
+            let tmark = self.mem_call_last_use.is_some().then(|| bx.mem_mark());
             let merging_succ = self.codegen_terminator(bx, bb, data.terminator());
+            if let Some(m) = tmark
+                && let Some(ids) = self.mem_call_last_use.take()
+            {
+                if bx.mem_last_use_first_since(m, &ids) {
+                    self.mem_stats.loan_ends_inline_call += ids.len() as u32;
+                } else {
+                    self.mem_stats.loan_ends_missed += ids.len() as u32;
+                }
+            }
             self.mem_loan_block_end(data.terminator(), matches!(merging_succ, MergingSucc::True));
             // Never let a pending marker reach an unrelated call.
             self.mem_call_bundle = None;
