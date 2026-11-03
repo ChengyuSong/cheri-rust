@@ -2450,6 +2450,9 @@ options! {
          `!mem.guard`, `llvm.mem.claim`, `mem.alloc_inbounds` facts, `\"mem.free\"`, \
          `!mem.last_use`) for the late LLVM CHERI passes; rustc itself makes no CHERI \
          decision (default: yes; CHERI targets only)"),
+    cheri_loan_end_at_return: bool = (false, parse_bool, [TRACKED],
+        "[LLM-generated] CHERI M5r R8 (D62): a loan end reached only at a return goes on \
+        the last memory access or call of that block (default: no)"),
     cheri_loan_ends: bool = (true, parse_bool, [TRACKED],
         "CHERI M5r R3 (D17): record borrowck loan-end points, carry them through the MIR \
          passes as `LoanEnd` markers and emit `!mem.last_use` from them (default: yes; \

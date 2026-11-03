@@ -1508,6 +1508,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             use mir::TerminatorKind as T;
             if matches!(term.kind, T::Return) {
                 self.mem_stats.loan_ends_at_return += ids.len() as u32;
+                // [LLM-generated] R8 (D62): a loan that ends only at the return (its
+                // last use is the final call or access of the body) gets the last
+                // carrier in this backend block, as D42 does at a goto: nothing between
+                // that carrier and the end point touches memory, so the fact is exact.
+                if self.cx.tcx().sess.opts.unstable_opts.cheri_loan_end_at_return
+                    && bx.mem_last_use_last_in_block(&ids)
+                {
+                    self.mem_stats.loan_ends_backward += ids.len() as u32;
+                }
                 return;
             }
             // Carry the ids into each normal (non-unwind) successor whose only MIR
