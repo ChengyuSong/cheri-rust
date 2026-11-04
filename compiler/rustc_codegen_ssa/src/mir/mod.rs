@@ -159,6 +159,9 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
     mem_slot_pending_age: u32,
     /// R8 (D64): source scope of the pending loan start (its `Ref` shares it).
     mem_slot_pending_scope: Option<mir::SourceScope>,
+    /// [LLM-generated] R9 (D65): loan starts of this block waiting for the first
+    /// assignment to their linked local.
+    mem_slot_links: Vec<(u64, mir::Local)>,
     /// [LLM-generated] R5 (D35): locals whose memory got a `!mem.loan` store, and its ids
     /// (a plain copy of such a local into memory carries the same loans).
     mem_slot_loans: rustc_data_structures::fx::FxHashMap<mir::Local, Vec<u64>>,
@@ -320,6 +323,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         mem_slot_pending: None,
         mem_slot_pending_age: 0,
         mem_slot_pending_scope: None,
+        mem_slot_links: Vec::new(),
         mem_slot_loans: Default::default(),
         mem_last_uses: Default::default(),
         mem_stats: Default::default(),

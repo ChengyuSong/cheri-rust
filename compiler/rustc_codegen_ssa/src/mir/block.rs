@@ -1626,6 +1626,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             if self.mem_slot_pending.take().is_some() {
                 self.mem_stats.loan_starts_missed += 1;
             }
+            // R9 (D65): linked starts also apply within their block only.
+            self.mem_stats.loan_starts_missed += self.mem_slot_links.len() as u32;
+            self.mem_slot_links.clear();
             let mut guard = self.mem_guards.remove(&bb);
             for (i, statement) in data.statements.iter().enumerate() {
                 let is_site = guard.is_some_and(|g| g.site.stmt == i);

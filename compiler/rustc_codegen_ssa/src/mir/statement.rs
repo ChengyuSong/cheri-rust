@@ -91,8 +91,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::StatementKind::Intrinsic(NonDivergingIntrinsic::LoanEnd(id)) => {
                 self.mem_loan_end(bx, id);
             }
-            mir::StatementKind::Intrinsic(NonDivergingIntrinsic::LoanStart(id)) => {
-                self.mem_loan_start(id, statement.source_info.scope);
+            mir::StatementKind::Intrinsic(NonDivergingIntrinsic::LoanStart(id, link)) => {
+                self.mem_loan_start(id, statement.source_info.scope, link);
             }
             mir::StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(ref op)) => {
                 let op_val = self.codegen_operand(bx, op);

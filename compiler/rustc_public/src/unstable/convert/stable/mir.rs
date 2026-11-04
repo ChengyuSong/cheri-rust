@@ -534,7 +534,7 @@ impl<'tcx> Stable<'tcx> for mir::NonDivergingIntrinsic<'tcx> {
                 })
             }
             NonDivergingIntrinsic::LoanEnd(id) => crate::mir::NonDivergingIntrinsic::LoanEnd(*id),
-            NonDivergingIntrinsic::LoanStart(id) => {
+            NonDivergingIntrinsic::LoanStart(id, _) => {
                 crate::mir::NonDivergingIntrinsic::LoanStart(*id)
             }
         }

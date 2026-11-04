@@ -623,7 +623,13 @@ fn insert_cheri_loan_ends<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId, body: &mut B
                 source_info,
                 // R6 (D43): borrowck's side table marks loan starts with bit 63.
                 StatementKind::Intrinsic(Box::new(if id & (1 << 63) != 0 {
-                    NonDivergingIntrinsic::LoanStart(id & !(1 << 63))
+                    // R9 (D65): link the start to the local its `Ref` (the statement it
+                    // is inserted in front of) is assigned to.
+                    let link = match data.statements.get(loc.statement_index).map(|s| &s.kind) {
+                        Some(StatementKind::Assign(a)) if matches!(a.1, Rvalue::Ref(..)) => a.0.local,
+                        _ => rustc_middle::mir::Local::MAX,
+                    };
+                    NonDivergingIntrinsic::LoanStart(id & !(1 << 63), link)
                 } else {
                     NonDivergingIntrinsic::LoanEnd(id)
                 })),

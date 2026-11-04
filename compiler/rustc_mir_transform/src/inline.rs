@@ -1274,7 +1274,7 @@ impl<'tcx> MutVisitor<'tcx> for Integrator<'_, 'tcx> {
         // [LLM-generated] CHERI M5r R3 (D17): a loan of an inlined body is a new loan per
         // inlined copy; re-key it with this copy's first new local (unique in the caller).
         if let StatementKind::Intrinsic(ndi) = &mut statement.kind
-            && let NonDivergingIntrinsic::LoanEnd(id) | NonDivergingIntrinsic::LoanStart(id) =
+            && let NonDivergingIntrinsic::LoanEnd(id) | NonDivergingIntrinsic::LoanStart(id, _) =
                 &mut **ndi
         {
             use std::hash::{Hash, Hasher};
