@@ -7,7 +7,7 @@
 //
 //@ revisions: new old
 //@ compile-flags: -Copt-level=2 -Zcheri-cap-bounds-checks=narrow
-//@[old] compile-flags: -Zcheri-slot-start-strict=no
+//@[old] compile-flags: -Zcheri-slot-start-strict=no -Zcheri-slot-start-link=no
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]
