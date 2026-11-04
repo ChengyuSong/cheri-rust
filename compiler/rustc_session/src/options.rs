@@ -2461,9 +2461,9 @@ options! {
         "[LLM-generated] CHERI M5r R8 (D63): a loan start followed directly by a copy of a \
         reference (a reborrow GVN turned into a copy) tags the copy's store with the loan \
         (default: yes)"),
-    cheri_loan_end_at_return: bool = (false, parse_bool, [TRACKED],
-        "[LLM-generated] CHERI M5r R8 (D62): a loan end reached only at a return goes on \
-        the last memory access or call of that block (default: no)"),
+    cheri_loan_end_at_return: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] CHERI M5r R8 (D62), default on since R9 (D68): a loan end reached \
+        only at a return goes on the last memory access or call of that block (default: yes)"),
     cheri_loan_ends: bool = (true, parse_bool, [TRACKED],
         "CHERI M5r R3 (D17): record borrowck loan-end points, carry them through the MIR \
          passes as `LoanEnd` markers and emit `!mem.last_use` from them (default: yes; \
