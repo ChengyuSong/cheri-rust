@@ -1056,6 +1056,39 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         self.cx.set_metadata_node(inst, k, &md);
     }
 
+    fn mem_loan_slot_since(&mut self, mark: Option<&'ll Value>, loans: &[u64]) -> u32 {
+        if loans.is_empty() || mem_off("loan") {
+            return 0;
+        }
+        let k = self.cx.get_md_kind_id("mem.loan");
+        let md: Vec<_> =
+            loans.iter().map(|&l| llvm::LLVMValueAsMetadata(self.cx.const_u64(l))).collect();
+        let mut n = 0;
+        unsafe {
+            let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let mut cur = match mark {
+                Some(m) => {
+                    if !std::ptr::eq(llvm::LLVMGetInstructionParent(m), bb) {
+                        return 0; // statement codegen left the block: no fact (fail-safe)
+                    }
+                    llvm::LLVMGetNextInstruction(m)
+                }
+                None => llvm::LLVMGetFirstInstruction(bb),
+            };
+            while let Some(i) = cur {
+                if llvm::LLVMIsAStoreInst(i).is_some()
+                    && let Some(v) = llvm::LLVMGetOperand(i, 0)
+                    && self.cx.type_kind(self.cx.val_ty(v)) == TypeKind::Pointer
+                {
+                    self.cx.set_metadata_node(i, k, &md);
+                    n += 1;
+                }
+                cur = llvm::LLVMGetNextInstruction(i);
+            }
+        }
+        n
+    }
+
     fn mem_mark(&mut self) -> Option<&'ll Value> {
         unsafe { llvm::LLVMGetLastInstruction(llvm::LLVMGetInsertBlock(self.llbuilder)) }
     }
@@ -1093,6 +1126,93 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                     break;
                 }
                 cur = llvm::LLVMGetNextInstruction(i);
+            }
+            found
+        };
+        match found {
+            Some(i) => {
+                self.mem_last_use(i, loans);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn mem_last_use_last_in_block(&mut self, loans: &[u64]) -> bool {
+        let found = unsafe {
+            let bb = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let mut cur = llvm::LLVMGetLastInstruction(bb);
+            // Skip the terminator (a branch: the end point is before it). R8 (D62): also a
+            // `ret` (a loan end reached only at the return; the block end hook runs after
+            // the terminator was emitted).
+            let mut at_ret = false;
+            if let Some(t) = cur
+                && llvm::LLVMIsATerminatorInst(t).is_some()
+            {
+                at_ret = llvm::LLVMIsAReturnInst(t).is_some();
+                if llvm::LLVMIsABranchInst(t).is_none()
+                    && llvm::LLVMIsASwitchInst(t).is_none()
+                    && !at_ret
+                {
+                    return false;
+                }
+                cur = llvm::LLVMGetPreviousInstruction(t);
+            }
+            let mut found = None;
+            while let Some(i) = cur {
+                let ok = if llvm::LLVMIsALoadInst(i).is_some() || llvm::LLVMIsAStoreInst(i).is_some() {
+                    true
+                } else if llvm::LLVMIsACallInst(i).is_some() {
+                    match llvm::LLVMGetCalledValue(i) {
+                        Some(f) => {
+                            let n = llvm::get_value_name(f);
+                            !n.starts_with(b"llvm.")
+                                || n.starts_with(b"llvm.memcpy")
+                                || n.starts_with(b"llvm.memmove")
+                                || n.starts_with(b"llvm.memset")
+                        }
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+                if ok {
+                    found = Some(i);
+                    break;
+                }
+                cur = llvm::LLVMGetPreviousInstruction(i);
+            }
+            // R8 (D62): a returning block without a carrier, entered by an unconditional
+            // `br` from the block laid out before it (the call's continuation block): that
+            // block's last carrier is followed only by the branch, so the loan ends there on
+            // that path. Other predecessors, if any, keep no end (fail-safe).
+            if found.is_none()
+                && at_ret
+                && let Some(prev) = llvm::LLVMGetPreviousBasicBlock(bb)
+                && let Some(t) = llvm::LLVMGetBasicBlockTerminator(prev)
+                && llvm::LLVMIsABranchInst(t).is_some()
+                && llvm::LLVMGetNumOperands(t) == 1
+                && llvm::LLVMGetOperand(t, 0)
+                    .is_some_and(|d| std::ptr::eq(d, llvm::LLVMBasicBlockAsValue(bb)))
+            {
+                let mut c = llvm::LLVMGetPreviousInstruction(t);
+                while let Some(i) = c {
+                    if llvm::LLVMIsALoadInst(i).is_some()
+                        || llvm::LLVMIsAStoreInst(i).is_some()
+                        || (llvm::LLVMIsACallInst(i).is_some()
+                            && llvm::LLVMGetCalledValue(i).is_none_or(|f| {
+                                let n = llvm::get_value_name(f);
+                                !n.starts_with(b"llvm.")
+                                    || n.starts_with(b"llvm.memcpy")
+                                    || n.starts_with(b"llvm.memmove")
+                                    || n.starts_with(b"llvm.memset")
+                            }))
+                    {
+                        found = Some(i);
+                        break;
+                    }
+                    c = llvm::LLVMGetPreviousInstruction(i);
+                }
             }
             found
         };

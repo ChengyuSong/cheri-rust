@@ -370,6 +370,11 @@ pub trait BuilderMethods<'a, 'tcx>:
     /// Attach the operand bundle `"<tag>"(ops)` to the next call/invoke built.
     fn set_next_call_mem_bundle(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
 
+    /// [LLM-generated] R5 (D35): `!mem.loan !{loans}` on every store of a pointer value
+    /// emitted since `mark` in the current block. Returns how many were tagged.
+    fn mem_loan_slot_since(&mut self, _mark: Option<Self::Value>, _loans: &[u64]) -> u32 {
+        0
+    }
     /// Attach `!mem.last_use !{loans}` to the next call/invoke built.
     fn set_next_call_mem_last_use(&mut self, _loans: &[u64]) {}
 
@@ -400,6 +405,13 @@ pub trait BuilderMethods<'a, 'tcx>:
     /// current block (from the block start if `mark` is `None` or in another block) with
     /// `!mem.last_use !{loans}`. Returns whether one was tagged.
     fn mem_last_use_first_since(&mut self, _mark: Option<Self::Value>, _loans: &[u64]) -> bool {
+        false
+    }
+    /// [LLM-generated] M5r R6 (D42): tag the *last* carrier already emitted in the
+    /// current block (before its terminator) with `!mem.last_use !{loans}`: a loan end
+    /// whose forward carrier would be in a join block. Nothing between that carrier and
+    /// the end point accesses memory (it would be a carrier), so the loan ends there.
+    fn mem_last_use_last_in_block(&mut self, _loans: &[u64]) -> bool {
         false
     }
     fn inbounds_gep(

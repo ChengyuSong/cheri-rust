@@ -153,6 +153,15 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
     mem_loan_pending: Option<(Option<Bx::Value>, Vec<u64>)>,
     /// [LLM-generated] D17: loan ends carried into a single-predecessor successor.
     mem_loan_carry: rustc_data_structures::fx::FxHashMap<mir::BasicBlock, Vec<u64>>,
+    /// [LLM-generated] R5 (D35): a loan start waiting for its `Rvalue::Ref` statement.
+    mem_slot_pending: Option<u64>,
+    /// R8 (D63): assignments codegen'd since the last loan start.
+    mem_slot_pending_age: u32,
+    /// R8 (D64): source scope of the pending loan start (its `Ref` shares it).
+    mem_slot_pending_scope: Option<mir::SourceScope>,
+    /// [LLM-generated] R5 (D35): locals whose memory got a `!mem.loan` store, and its ids
+    /// (a plain copy of such a local into memory carries the same loans).
+    mem_slot_loans: rustc_data_structures::fx::FxHashMap<mir::Local, Vec<u64>>,
 
     /// M5r: simple-case loan last uses of this body.
     mem_last_uses: mem_annot::LastUses,
@@ -308,6 +317,10 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         mem_call_last_use: None,
         mem_loan_pending: None,
         mem_loan_carry: Default::default(),
+        mem_slot_pending: None,
+        mem_slot_pending_age: 0,
+        mem_slot_pending_scope: None,
+        mem_slot_loans: Default::default(),
         mem_last_uses: Default::default(),
         mem_stats: Default::default(),
     };

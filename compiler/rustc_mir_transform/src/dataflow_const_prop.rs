@@ -217,7 +217,7 @@ impl<'a, 'tcx> ConstAnalysis<'a, 'tcx> {
             }) => {
                 // This statement represents `*dst = *src`, `count` times.
             }
-            NonDivergingIntrinsic::LoanEnd(..) => {}
+            NonDivergingIntrinsic::LoanEnd(..) | NonDivergingIntrinsic::LoanStart(..) => {}
         }
     }
 

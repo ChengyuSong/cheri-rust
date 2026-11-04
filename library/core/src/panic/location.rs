@@ -46,6 +46,15 @@ pub struct Location<'a> {
     _filename: PhantomData<&'a str>,
 }
 
+impl Location<'static> {
+    /// [LLM-generated] CHERI M5r R6 (D47): a location read from the `cheri_trap_map`.
+    /// `file` must be followed by a NUL byte (see `file_as_c_str`).
+    #[inline]
+    pub(crate) const unsafe fn cheri_trap_location(file: &'static str, line: u32, col: u32) -> Self {
+        Location { filename: NonNull::from_ref(file), line, col, _filename: PhantomData }
+    }
+}
+
 #[stable(feature = "panic_hooks", since = "1.10.0")]
 #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
 const impl PartialEq for Location<'_> {

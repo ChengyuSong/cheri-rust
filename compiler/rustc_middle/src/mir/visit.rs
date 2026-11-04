@@ -485,7 +485,7 @@ macro_rules! make_mir_visitor {
                                 self.visit_operand(dst, location);
                                 self.visit_operand(count, location);
                             }
-                            NonDivergingIntrinsic::LoanEnd(_) => {}
+                            NonDivergingIntrinsic::LoanEnd(_) | NonDivergingIntrinsic::LoanStart(_) => {}
                         }
                     }
                     StatementKind::BackwardIncompatibleDropHint { place, .. } => {

@@ -80,6 +80,33 @@ pub const fn panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
     unsafe { panic_impl(&pi) }
 }
 
+/// [LLM-generated] CHERI M5r R6 (D47): raise the panic a removed software check would
+/// have raised, from a CHERI fault handler that found the faulting pc in the
+/// `cheri_trap_map` (file/line/col from the map). The panic handler (std: the panic
+/// hook) sees the original location. Not reentrant (one trap location slot); the
+/// handler runs on the faulting hart with the fault not returning.
+#[unstable(feature = "cheri_trap_panic", issue = "none")]
+#[doc(hidden)]
+#[inline(never)]
+#[cold]
+pub fn cheri_trap_panic(file: &'static str, line: u32, col: u32, msg: fmt::Arguments<'_>) -> ! {
+    struct Slot(crate::cell::UnsafeCell<crate::mem::MaybeUninit<Location<'static>>>);
+    // SAFETY: written once per (non-returning) trap, read by the panic handler only.
+    unsafe impl Sync for Slot {}
+    static SLOT: Slot = Slot(crate::cell::UnsafeCell::new(crate::mem::MaybeUninit::uninit()));
+    unsafe extern "Rust" {
+        #[lang = "panic_impl"]
+        fn panic_impl(pi: &PanicInfo<'_>) -> !;
+    }
+    // SAFETY: see `Slot`; `file` is followed by a NUL (the map pads names with NULs).
+    let loc: &'static Location<'static> = unsafe {
+        (*SLOT.0.get()).write(Location::cheri_trap_location(file, line, col))
+    };
+    let pi = PanicInfo::new(&msg, loc, /* can_unwind */ false, /* force_no_backtrace */ false);
+    // SAFETY: `panic_impl` is defined in safe Rust code and thus is safe to call.
+    unsafe { panic_impl(&pi) }
+}
+
 /// Like `panic_fmt`, but for non-unwinding panics.
 ///
 /// Has to be a separate function so that it can carry the `rustc_nounwind` attribute.

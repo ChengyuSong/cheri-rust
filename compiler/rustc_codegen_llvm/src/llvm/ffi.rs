@@ -1200,6 +1200,17 @@ unsafe extern "C" {
     pub(crate) fn LLVMIsALoadInst(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsAStoreInst(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsACallInst(Val: &Value) -> Option<&Value>;
+    // M5r R6 (D42)
+    pub(crate) fn LLVMGetPreviousInstruction(Inst: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsATerminatorInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsABranchInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMIsASwitchInst(Val: &Value) -> Option<&Value>;
+    // [LLM-generated] M5r R8 (D62)
+    pub(crate) fn LLVMIsAReturnInst(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMGetPreviousBasicBlock(BB: &BasicBlock) -> Option<&BasicBlock>;
+    pub(crate) fn LLVMGetBasicBlockTerminator(BB: &BasicBlock) -> Option<&Value>;
+    pub(crate) fn LLVMGetNumOperands(Val: &Value) -> c_int;
+    pub(crate) fn LLVMBasicBlockAsValue(BB: &BasicBlock) -> &Value;
     pub(crate) fn LLVMGetNumArgOperands(Instr: &Value) -> c_uint;
     pub(crate) fn LLVMGetCalledValue(Instr: &Value) -> Option<&Value>;
     pub(crate) fn LLVMGetFirstBasicBlock(Fn: &Value) -> &BasicBlock;

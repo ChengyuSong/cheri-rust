@@ -621,7 +621,12 @@ fn insert_cheri_loan_ends<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId, body: &mut B
             loc.statement_index,
             Statement::new(
                 source_info,
-                StatementKind::Intrinsic(Box::new(NonDivergingIntrinsic::LoanEnd(id))),
+                // R6 (D43): borrowck's side table marks loan starts with bit 63.
+                StatementKind::Intrinsic(Box::new(if id & (1 << 63) != 0 {
+                    NonDivergingIntrinsic::LoanStart(id & !(1 << 63))
+                } else {
+                    NonDivergingIntrinsic::LoanEnd(id)
+                })),
             ),
         );
     }

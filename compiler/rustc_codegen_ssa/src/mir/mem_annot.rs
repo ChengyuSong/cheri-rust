@@ -35,6 +35,10 @@ use super::{FunctionCx, LocalRef};
 use crate::traits::*;
 
 // Claim flags (llvm/IR/MemAnnot.h `ClaimKind` / `ClaimFlags`).
+/// [LLM-generated] R5 (D35): bit 63 marked a loan start in the R5 `LoanEnd` encoding. Since
+/// R6 (D43) loan starts are `NonDivergingIntrinsic::LoanStart` statements and the bit only
+/// exists in the borrowck side table; R7 (D56): kept here only to mask ids defensively.
+pub(crate) const CHERI_LOAN_START: u64 = 1 << 63;
 pub(crate) const CK_REF: u64 = 0;
 pub(crate) const CK_SLICE: u64 = 1;
 pub(crate) const CK_RAW_REF: u64 = 5;
@@ -1195,6 +1199,15 @@ pub(crate) struct MemStats {
     pub loan_ends_at_return: u32,
     pub loan_ends_missed: u32,
     pub loan_ends_carried: u32,
+    /// R5 (D35): loan starts reached at codegen, slot-fact stores tagged, starts whose
+    /// next statement was not a `Ref` into memory.
+    pub loan_starts: u32,
+    pub loan_slot_stores: u32,
+    pub loan_slot_copies: u32,
+    pub loan_starts_missed: u32,
+    pub loan_slot_ssa: u32,
+    pub loan_ends_inline_call: u32,
+    pub loan_ends_backward: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1367,13 +1380,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         }
         self.mem_stats.loan_ends += 1;
-        let id = {
-            use std::hash::{Hash, Hasher};
-            let mut h = rustc_data_structures::fx::FxHasher::default();
-            self.cx.tcx().symbol_name(self.instance).name.hash(&mut h);
-            id.hash(&mut h);
-            (h.finish() & 0x1fff_ffff_ffff_ffff) | (1 << 61)
-        };
+        let id = self.mem_loan_key(id);
         // Older pending ids found no carrier up to here, so they can share the new mark.
         self.mem_loan_flush(bx);
         let mark = bx.mem_mark();
@@ -1383,6 +1390,121 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 ids.push(id);
             }
             None => self.mem_loan_pending = Some((mark, vec![id])),
+        }
+    }
+
+    /// The `!mem.last_use` / `!mem.loan` id of a MIR loan id (start flag ignored).
+    fn mem_loan_key(&self, id: u64) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let id = id & !CHERI_LOAN_START;
+        let mut h = rustc_data_structures::fx::FxHasher::default();
+        self.cx.tcx().symbol_name(self.instance).name.hash(&mut h);
+        id.hash(&mut h);
+        (h.finish() & 0x1fff_ffff_ffff_ffff) | (1 << 61)
+    }
+
+    /// [LLM-generated] M5r R5 (D35): a loan start. The next statement, if it is the
+    /// loan's `Rvalue::Ref` assigned into memory, tags the store of the reference with
+    /// `!mem.loan !{id}` (the slot fact for the late CHERI pass's loan-end invalidation).
+    pub(crate) fn mem_loan_start(&mut self, id: u64, scope: mir::SourceScope) {
+        if !self.mem_annotate() {
+            return;
+        }
+        self.mem_stats.loan_starts += 1;
+        if self.mem_slot_pending.is_some() {
+            self.mem_stats.loan_starts_missed += 1;
+        }
+        self.mem_slot_pending = Some(self.mem_loan_key(id));
+        self.mem_slot_pending_age = 0;
+        self.mem_slot_pending_scope = Some(scope);
+    }
+
+    /// Statement hook (before codegen): the loans whose reference this statement stores
+    /// into memory. A pending loan start waits (within its block) for the next `Ref`
+    /// (MIR opts may put e.g. a Box-deref temp in between); a `Ref` or a copy of a
+    /// reference local into an SSA (operand) local only records the loans for the local,
+    /// so a later copy of it into memory is tagged. A copy with a pending start (a
+    /// reborrow that GVN turned into a copy) carries both loans (D35: the slot's region
+    /// is contained in each).
+    pub(crate) fn mem_slot_before(&mut self, stmt: &mir::Statement<'tcx>) -> Option<Vec<u64>> {
+        let StatementKind::Assign(assign) = &stmt.kind else { return None };
+        self.mem_slot_pending_age += 1;
+        // [LLM-generated] R8 (D64): a loan start pairs only with the assignment right
+        // after it, in the same source scope. With MIR inlining + GVN a start's own `Ref`
+        // can be folded away (e.g. `&self.filename` of an inlined `as_ptr`), and the R5
+        // "next `Ref` of the block" rule then tagged an unrelated later reference (seen on
+        // `Location::file()` in a panic handler: the slot was cleared while `fmt::Arguments`
+        // still used it). A start that does not pair is dropped (fail-safe: no clear).
+        if self.mem_slot_pending.is_some()
+            && self.cx.tcx().sess.opts.unstable_opts.cheri_slot_start_strict
+            && (self.mem_slot_pending_age != 1
+                || self.mem_slot_pending_scope != Some(stmt.source_info.scope))
+        {
+            self.mem_slot_pending = None;
+            self.mem_stats.loan_starts_missed += 1;
+        }
+        let (place, rv) = &**assign;
+        let in_mem = matches!(self.locals[place.local], LocalRef::Place(_))
+            && !place.projection.iter().any(|e| matches!(e, PlaceElem::Deref));
+        let ids = match rv {
+            Rvalue::Ref(..) => vec![self.mem_slot_pending.take()?],
+            Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _) if src.projection.is_empty() => {
+                let mut ids = match self.mem_slot_loans.get(&src.local).cloned() {
+                    Some(ids) => ids,
+                    // [LLM-generated] R8 (D63): a reborrow that GVN turned into a copy of a
+                    // reference whose own loan is not known (e.g. it came from an inlined
+                    // `Index::index`): the copy right after the loan start (first
+                    // assignment since) carries that loan alone.
+                    None if self.cx.tcx().sess.opts.unstable_opts.cheri_slot_copy_start
+                        && self.mem_slot_pending.is_some()
+                        && self.mem_slot_pending_age == 1
+                        && self.mir.local_decls[src.local].ty.is_ref() =>
+                    {
+                        Vec::new()
+                    }
+                    None => return None,
+                };
+                if let Some(id) = self.mem_slot_pending.take() {
+                    ids.push(id);
+                }
+                ids
+            }
+            _ => return None,
+        };
+        if in_mem {
+            return Some(ids);
+        }
+        match place.as_local() {
+            Some(l) if !matches!(self.locals[l], LocalRef::Place(_)) => {
+                self.mem_stats.loan_slot_ssa += 1;
+                self.mem_slot_loans.insert(l, ids);
+            }
+            _ => self.mem_stats.loan_starts_missed += 1,
+        }
+        None
+    }
+
+    /// Statement hook (after codegen): tag the reference stores emitted since `mark`.
+    pub(crate) fn mem_slot_after(
+        &mut self,
+        bx: &mut Bx,
+        stmt: &mir::Statement<'tcx>,
+        mark: Option<Bx::Value>,
+        ids: Vec<u64>,
+    ) {
+        let mir::StatementKind::Assign(assign) = &stmt.kind else { return };
+        let n = bx.mem_loan_slot_since(mark, &ids);
+        if n == 0 {
+            self.mem_stats.loan_starts_missed += 1;
+            return;
+        }
+        if matches!(assign.1, mir::Rvalue::Ref(..)) {
+            self.mem_stats.loan_slot_stores += n;
+        } else {
+            self.mem_stats.loan_slot_copies += n;
+        }
+        if let Some(l) = assign.0.as_local() {
+            self.mem_slot_loans.insert(l, ids);
         }
     }
 
@@ -1409,7 +1531,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
     /// After the terminator: unless the successor is merged into this backend block, the
     /// ids that found no carrier are dropped (counted; at a return the frame dies anyway).
-    pub(crate) fn mem_loan_block_end(&mut self, term: &mir::Terminator<'tcx>, merged: bool) {
+    pub(crate) fn mem_loan_block_end(&mut self, bx: &mut Bx, term: &mir::Terminator<'tcx>, merged: bool) {
         if merged {
             return;
         }
@@ -1417,6 +1539,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             use mir::TerminatorKind as T;
             if matches!(term.kind, T::Return) {
                 self.mem_stats.loan_ends_at_return += ids.len() as u32;
+                // [LLM-generated] R8 (D62): a loan that ends only at the return (its
+                // last use is the final call or access of the body) gets the last
+                // carrier in this backend block, as D42 does at a goto: nothing between
+                // that carrier and the end point touches memory, so the fact is exact.
+                if self.cx.tcx().sess.opts.unstable_opts.cheri_loan_end_at_return
+                    && bx.mem_last_use_last_in_block(&ids)
+                {
+                    self.mem_stats.loan_ends_backward += ids.len() as u32;
+                }
                 return;
             }
             // Carry the ids into each normal (non-unwind) successor whose only MIR
@@ -1441,6 +1572,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
             if carried {
                 self.mem_stats.loan_ends_carried += ids.len() as u32;
+            } else if matches!(term.kind, T::Goto { .. } | T::SwitchInt { .. })
+                && bx.mem_last_use_last_in_block(&ids)
+            {
+                // R6 (D42): the last carrier before the end point in this block.
+                self.mem_stats.loan_ends_backward += ids.len() as u32;
             } else {
                 self.mem_stats.loan_ends_missed += ids.len() as u32;
             }
@@ -1473,7 +1609,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let s = &self.mem_stats;
         let tcx = self.cx.tcx();
         let line = format!(
-            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\n",
+            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\n",
             tcx.symbol_name(self.instance).name,
             s.sites_matched,
             s.sites_unmatched,
@@ -1492,6 +1628,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             s.loan_ends_at_return,
             s.loan_ends_missed,
             s.loan_ends_carried,
+            s.loan_starts,
+            s.loan_slot_stores,
+            s.loan_slot_copies,
+            s.loan_starts_missed,
+            s.loan_slot_ssa,
+            s.loan_ends_inline_call,
+            s.loan_ends_backward,
         );
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
