@@ -1397,6 +1397,24 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
     }
 
+    /// [LLM-generated] R11 (D74): locals assigned exactly once in the body.
+    pub(crate) fn mem_single_assigned(&self) -> rustc_data_structures::fx::FxHashSet<mir::Local> {
+        let mut n: rustc_data_structures::fx::FxHashMap<mir::Local, u32> = Default::default();
+        for bb in self.mir.basic_blocks.iter() {
+            for st in &bb.statements {
+                if let StatementKind::Assign(a) = &st.kind {
+                    *n.entry(a.0.local).or_default() += 1;
+                }
+            }
+            if let mir::TerminatorKind::Call { destination, .. } = &bb.terminator().kind {
+                *n.entry(destination.local).or_default() += 1;
+            }
+        }
+        #[allow(rustc::potential_query_instability)] // set membership only, order unused
+        let r = n.into_iter().filter(|&(_, c)| c == 1).map(|(l, _)| l).collect();
+        r
+    }
+
     /// The `!mem.last_use` / `!mem.loan` id of a MIR loan id (start flag ignored).
     fn mem_loan_key(&self, id: u64) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -1513,8 +1531,33 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             // [LLM-generated] R10 (D71): `&'a T` held in a struct/enum/closure field.
             // Only one pointer-carrying operand: the other fields are plain data, so a
             // clear at the loan's end cannot hit a field with a longer-lived pointer.
-            Rvalue::Aggregate(_, ops) if self.cx.tcx().sess.opts.unstable_opts.cheri_slot_aggregate => {
+            Rvalue::Aggregate(kind, ops) if self.cx.tcx().sess.opts.unstable_opts.cheri_slot_aggregate => {
                 let tcx = self.cx.tcx();
+                // [LLM-generated] R11 (D75): an ADT whose only generic parameter is one
+                // lifetime is dead once that lifetime ends, and the lifetime lies within
+                // every loan of a reference stored in it, so the loans of all its
+                // reference operands may clear the whole value.
+                if let mir::AggregateKind::Adt(def, ..) = &**kind
+                    && let g = tcx.generics_of(*def)
+                    && g.parent_count == 0
+                    && g.own_params.len() == 1
+                    && g.own_counts().lifetimes == 1
+                {
+                    let mut ids = Vec::new();
+                    for o in ops.iter() {
+                        if let Operand::Copy(src) | Operand::Move(src) = o
+                            && src.projection.is_empty()
+                            && let Some(l) = self.mem_slot_loans.get(&src.local)
+                        {
+                            ids.extend(l.iter().copied());
+                        }
+                    }
+                    if ids.is_empty() {
+                        return None;
+                    }
+                    self.mem_stats.loan_slot_aggregate += 1;
+                    ids
+                } else {
                 let mut ptrish = ops.iter().filter(|o| {
                     let t = self.monomorphize(o.ty(&self.mir.local_decls, tcx));
                     !(t.is_integral() || t.is_floating_point() || t.is_bool() || t.is_char()
@@ -1528,6 +1571,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let ids = self.mem_slot_loans.get(&src.local).cloned()?;
                 self.mem_stats.loan_slot_aggregate += 1;
                 ids
+                }
             }
             _ => return None,
         };

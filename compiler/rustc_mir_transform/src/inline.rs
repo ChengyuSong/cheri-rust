@@ -915,6 +915,38 @@ fn inline_call<'tcx, I: Inliner<'tcx>>(
         )
     };
 
+    // [LLM-generated] CHERI M5r R11 (D74): a loan start linked to a reference argument
+    // whose region the callee's signature ties to its returned reference (e.g.
+    // `Index::index(&'a self, ..) -> &'a T`) is re-linked to the call's destination: the
+    // returned reference lives within that loan. Only a fact; no CHERI decision here.
+    if tcx.sess.opts.unstable_opts.cheri_loan_call_link
+        && matches!(callsite.callee.def, ty::InstanceKind::Item(_))
+        && matches!(tcx.def_kind(callsite.callee.def_id()), DefKind::Fn | DefKind::AssocFn)
+    {
+        let sig = tcx.fn_sig(callsite.callee.def_id()).instantiate_identity().skip_binder();
+        if let ty::Ref(r_out, ..) = sig.output().kind() {
+            for (i, inp) in sig.inputs().iter().enumerate() {
+                let ty::Ref(r_in, ..) = inp.kind() else { continue };
+                if r_in != r_out {
+                    continue;
+                }
+                let Some(arg) = args.get(i) else { continue };
+                let (Operand::Copy(p) | Operand::Move(p)) = &arg.node else { continue };
+                let Some(t) = p.as_local() else { continue };
+                for bb in caller_body.basic_blocks_mut().iter_mut() {
+                    for st in bb.statements.iter_mut() {
+                        if let StatementKind::Intrinsic(ndi) = &mut st.kind
+                            && let NonDivergingIntrinsic::LoanStart(_, l) = &mut **ndi
+                            && *l == t
+                        {
+                            *l = destination_local;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Copy the arguments if needed.
     let args = make_call_args(inliner, args, callsite, caller_body, &callee_body, return_block);
 
