@@ -2453,6 +2453,10 @@ options! {
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),
+    cheri_slot_aggregate: bool = (false, parse_bool, [TRACKED],
+        "[LLM-generated] CHERI M5r R10 (D71): an aggregate (struct, enum variant, closure) \
+        stored into memory whose only pointer-carrying operand is a reference local with \
+        known loans tags its capability stores with those loans (default off: R10 prototype, inert on the lifetimes gadgets)"),
     cheri_slot_start_link: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R9 (D65): a loan start tags only the first assignment to \
         the local its `Ref` was assigned to at borrowck (explicit link carried by the MIR \
