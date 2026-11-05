@@ -5,7 +5,9 @@
 //
 //@ revisions: on off
 //@ compile-flags: -Copt-level=2 -Zcheri-cap-bounds-checks=narrow
-//@[off] compile-flags: -Zcheri-slot-copy-start=no
+//@[off] compile-flags: -Zcheri-slot-copy-start=no -Zcheri-loan-call-link=no
+// R12 (D79): D74 (default on since R12) links the loan through the inlined `Index::index`
+// call independently of D63, so `off` turns both off. [LLM-generated]
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]

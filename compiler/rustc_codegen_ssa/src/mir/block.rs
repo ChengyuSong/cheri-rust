@@ -1627,8 +1627,19 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 self.mem_stats.loan_starts_missed += 1;
             }
             // R9 (D65): linked starts also apply within their block only.
-            self.mem_stats.loan_starts_missed += self.mem_slot_links.len() as u32;
-            self.mem_slot_links.clear();
+            // [LLM-generated] R11 (D74): with -Zcheri-loan-call-link a link to a local
+            // assigned exactly once in the body survives block boundaries (the start is
+            // in front of the call whose inlined body assigns it, so it dominates it, and
+            // blocks are generated in reverse postorder).
+            if self.cx.tcx().sess.opts.unstable_opts.cheri_loan_call_link && !self.mem_slot_links.is_empty() {
+                let single = self.mem_single_assigned();
+                let before = self.mem_slot_links.len();
+                self.mem_slot_links.retain(|&(_, l)| single.contains(&l));
+                self.mem_stats.loan_starts_missed += (before - self.mem_slot_links.len()) as u32;
+            } else {
+                self.mem_stats.loan_starts_missed += self.mem_slot_links.len() as u32;
+                self.mem_slot_links.clear();
+            }
             let mut guard = self.mem_guards.remove(&bb);
             for (i, statement) in data.statements.iter().enumerate() {
                 let is_site = guard.is_some_and(|g| g.site.stmt == i);
