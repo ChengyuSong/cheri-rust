@@ -1206,8 +1206,12 @@ pub(crate) struct MemStats {
     pub loan_slot_copies: u32,
     pub loan_starts_missed: u32,
     pub loan_slot_ssa: u32,
+    pub loan_slot_aggregate: u32,
     pub loan_ends_inline_call: u32,
     pub loan_ends_backward: u32,
+    /// R9 (D65): linked starts paired with their local's assignment / with a lost link.
+    pub loan_link_paired: u32,
+    pub loan_link_lost: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1406,11 +1410,21 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// [LLM-generated] M5r R5 (D35): a loan start. The next statement, if it is the
     /// loan's `Rvalue::Ref` assigned into memory, tags the store of the reference with
     /// `!mem.loan !{id}` (the slot fact for the late CHERI pass's loan-end invalidation).
-    pub(crate) fn mem_loan_start(&mut self, id: u64, scope: mir::SourceScope) {
+    pub(crate) fn mem_loan_start(&mut self, id: u64, scope: mir::SourceScope, link: mir::Local) {
         if !self.mem_annotate() {
             return;
         }
         self.mem_stats.loan_starts += 1;
+        if self.cx.tcx().sess.opts.unstable_opts.cheri_slot_start_link {
+            // R9 (D65): explicit link; a lost link drops the start (fail-safe).
+            if link == mir::Local::MAX {
+                self.mem_stats.loan_starts_missed += 1;
+                self.mem_stats.loan_link_lost += 1;
+            } else {
+                self.mem_slot_links.push((self.mem_loan_key(id), link));
+            }
+            return;
+        }
         if self.mem_slot_pending.is_some() {
             self.mem_stats.loan_starts_missed += 1;
         }
@@ -1429,6 +1443,32 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     pub(crate) fn mem_slot_before(&mut self, stmt: &mir::Statement<'tcx>) -> Option<Vec<u64>> {
         let StatementKind::Assign(assign) = &stmt.kind else { return None };
         self.mem_slot_pending_age += 1;
+        // [LLM-generated] R9 (D65): with the explicit link, the first assignment to a
+        // start's linked local pairs with it: a `Ref` (the start's own, or a reborrow of the
+        // same loan), or a copy of a reference (D63); anything else drops the start.
+        if self.cx.tcx().sess.opts.unstable_opts.cheri_slot_start_link {
+            let dest = assign.0.local;
+            if let Some(k) = self.mem_slot_links.iter().position(|&(_, l)| l == dest) {
+                let (id, _) = self.mem_slot_links.remove(k);
+                let pairs = match &assign.1 {
+                    Rvalue::Ref(..) => true,
+                    Rvalue::Use(Operand::Copy(s) | Operand::Move(s), _) => {
+                        s.projection.is_empty()
+                            && self.cx.tcx().sess.opts.unstable_opts.cheri_slot_copy_start
+                            && self.mir.local_decls[s.local].ty.is_ref()
+                    }
+                    _ => false,
+                };
+                if pairs && assign.0.projection.is_empty() {
+                    self.mem_slot_pending = Some(id);
+                    self.mem_slot_pending_age = 1;
+                    self.mem_slot_pending_scope = Some(stmt.source_info.scope);
+                    self.mem_stats.loan_link_paired += 1;
+                } else {
+                    self.mem_stats.loan_starts_missed += 1;
+                }
+            }
+        }
         // [LLM-generated] R8 (D64): a loan start pairs only with the assignment right
         // after it, in the same source scope. With MIR inlining + GVN a start's own `Ref`
         // can be folded away (e.g. `&self.filename` of an inlined `as_ptr`), and the R5
@@ -1437,6 +1477,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // still used it). A start that does not pair is dropped (fail-safe: no clear).
         if self.mem_slot_pending.is_some()
             && self.cx.tcx().sess.opts.unstable_opts.cheri_slot_start_strict
+            && !self.cx.tcx().sess.opts.unstable_opts.cheri_slot_start_link
             && (self.mem_slot_pending_age != 1
                 || self.mem_slot_pending_scope != Some(stmt.source_info.scope))
         {
@@ -1467,6 +1508,25 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 if let Some(id) = self.mem_slot_pending.take() {
                     ids.push(id);
                 }
+                ids
+            }
+            // [LLM-generated] R10 (D71): `&'a T` held in a struct/enum/closure field.
+            // Only one pointer-carrying operand: the other fields are plain data, so a
+            // clear at the loan's end cannot hit a field with a longer-lived pointer.
+            Rvalue::Aggregate(_, ops) if self.cx.tcx().sess.opts.unstable_opts.cheri_slot_aggregate => {
+                let tcx = self.cx.tcx();
+                let mut ptrish = ops.iter().filter(|o| {
+                    let t = self.monomorphize(o.ty(&self.mir.local_decls, tcx));
+                    !(t.is_integral() || t.is_floating_point() || t.is_bool() || t.is_char()
+                        || t.is_unit())
+                });
+                let (Some(op), None) = (ptrish.next(), ptrish.next()) else { return None };
+                let (Operand::Copy(src) | Operand::Move(src)) = op else { return None };
+                if !src.projection.is_empty() || !self.mir.local_decls[src.local].ty.is_ref() {
+                    return None;
+                }
+                let ids = self.mem_slot_loans.get(&src.local).cloned()?;
+                self.mem_stats.loan_slot_aggregate += 1;
                 ids
             }
             _ => return None,
@@ -1609,7 +1669,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let s = &self.mem_stats;
         let tcx = self.cx.tcx();
         let line = format!(
-            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\n",
+            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\tloan_link_paired={}\tloan_link_lost={}\tloan_slot_aggregate={}\n",
             tcx.symbol_name(self.instance).name,
             s.sites_matched,
             s.sites_unmatched,
@@ -1635,6 +1695,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             s.loan_slot_ssa,
             s.loan_ends_inline_call,
             s.loan_ends_backward,
+            s.loan_link_paired,
+            s.loan_link_lost,
+            s.loan_slot_aggregate,
         );
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {

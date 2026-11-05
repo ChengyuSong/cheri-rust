@@ -37,7 +37,7 @@
 use itertools::Itertools as _;
 use rustc_index::bit_set::DenseBitSet;
 use rustc_index::{Idx, IndexSlice, IndexVec};
-use rustc_middle::mir::visit::{MutVisitor, MutatingUseContext, PlaceContext, Visitor};
+use rustc_middle::mir::visit::{MutVisitor, MutatingUseContext, NonUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
 use rustc_mir_dataflow::debuginfo::debuginfo_locals;
@@ -670,7 +670,12 @@ impl<'tcx> MutVisitor<'tcx> for LocalUpdater<'tcx> {
         self.super_statement_debuginfo(stmt_debuginfo, location);
     }
 
-    fn visit_local(&mut self, l: &mut Local, _: PlaceContext, _: Location) {
+    fn visit_local(&mut self, l: &mut Local, ctx: PlaceContext, _: Location) {
+        // [LLM-generated] R9 (D65): a `LoanStart` link to a removed local is lost.
+        if matches!(ctx, PlaceContext::NonUse(NonUseContext::VarDebugInfo)) && self.map[*l].is_none() {
+            *l = Local::MAX;
+            return;
+        }
         *l = self.map[*l].unwrap();
     }
 }

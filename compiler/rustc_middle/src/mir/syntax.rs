@@ -492,7 +492,11 @@ pub enum NonDivergingIntrinsic<'tcx> {
     /// before the loan's `Rvalue::Ref`). No effect on execution; codegen tags the store of
     /// the new reference with `!mem.loan !{id}` (the slot fact for loan-end invalidation).
     /// Dropping it is always sound (the slot is then simply not a loan slot).
-    LoanStart(u64),
+    /// [LLM-generated] R9 (D65): the second field is the explicit link to the loan's
+    /// `Rvalue::Ref`: the local it is assigned to (borrowck's `assigned_place` base). The
+    /// MIR visitors rename it with the body; `Local::MAX` means the link was lost (e.g. the
+    /// local was removed), and the start is then dropped by codegen.
+    LoanStart(u64, Local),
 }
 
 /// Describes whether this operand use performs a retag.

@@ -923,7 +923,7 @@ impl Display for NonDivergingIntrinsic<'_> {
                 write!(f, "copy_nonoverlapping(dst = {dst:?}, src = {src:?}, count = {count:?})")
             }
             Self::LoanEnd(id) => write!(f, "loan_end({id:#x})"),
-            Self::LoanStart(id) => write!(f, "loan_start({id:#x})"),
+            Self::LoanStart(id, l) => write!(f, "loan_start({id:#x}, {l:?})"),
         }
     }
 }

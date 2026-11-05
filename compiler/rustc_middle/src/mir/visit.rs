@@ -485,7 +485,17 @@ macro_rules! make_mir_visitor {
                                 self.visit_operand(dst, location);
                                 self.visit_operand(count, location);
                             }
-                            NonDivergingIntrinsic::LoanEnd(_) | NonDivergingIntrinsic::LoanStart(_) => {}
+                            NonDivergingIntrinsic::LoanEnd(_) => {}
+                            // [LLM-generated] R9 (D65): rename the link with the body.
+                            NonDivergingIntrinsic::LoanStart(_, l) => {
+                                if *l != Local::MAX {
+                                    self.visit_local(
+                                        $(& $mutability)? *l,
+                                        PlaceContext::NonUse(NonUseContext::VarDebugInfo),
+                                        location,
+                                    );
+                                }
+                            }
                         }
                     }
                     StatementKind::BackwardIncompatibleDropHint { place, .. } => {
