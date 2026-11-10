@@ -9,6 +9,10 @@
 // before those opts, so the positive cases still see them. `-Copt-level=0` leaves
 // rustc's markers in the IR; this file does not enable CheriBoundsLowering.
 //
+// FileCheck notes (validated against CHERI rustc): panic blocks are emitted after
+// the success-path `ret`, so `ret` / `"mem.check"` / `!mem.guard` are all CHECK-DAG
+// within each CHECK-LABEL range. Regexes must be wrapped in `{{ }}`.
+//
 //@ compile-flags: -Copt-level=0 -Zmir-opt-level=0 -Coverflow-checks=off -Cdebug-assertions=off
 //@ only-riscv64cheri-unknown-none-purecap
 
@@ -20,12 +24,12 @@ use alloc::vec::Vec;
 
 // `a[i].len()` is a shared borrow of the element. The success block is
 // `loan_start` then `_ = &(*a)[i]`. Panic-block order is not fixed, so the
-// marker and the guard are unordered.
+// marker, the guard, and the return are unordered.
 //
 // CHECK-LABEL: @one(
-// CHECK-DAG: "mem.check"(ptr addrspace(200) {{(nonnull )?%[^,)]+}}, i64 {{[^,]+}}, i64 [1-9][0-9]*, i64 {{[0-9]+}}, i64 256)
+// CHECK-DAG: "mem.check"(ptr addrspace(200) {{(nonnull )?%[^,)]+}}, i64 {{[^,]+}}, i64 {{[1-9][0-9]*}}, i64 {{[0-9]+}}, i64 256)
 // CHECK-DAG: !mem.guard
-// CHECK: ret i64
+// CHECK-DAG: ret i64
 #[unsafe(no_mangle)]
 pub fn one(a: &mut [Vec<u8>], i: usize) -> usize {
     a[i].len()
@@ -35,11 +39,11 @@ pub fn one(a: &mut [Vec<u8>], i: usize) -> usize {
 // each guarding its own place (`a[i]` and `b[n - 1 - i]`).
 //
 // CHECK-LABEL: @revswap(
-// CHECK-DAG: "mem.check"(ptr addrspace(200) {{(nonnull )?%[^,)]+}}, i64 {{[^,]+}}, i64 [1-9][0-9]*, i64 {{[0-9]+}}, i64 256)
-// CHECK-DAG: "mem.check"(ptr addrspace(200) {{(nonnull )?%[^,)]+}}, i64 {{[^,]+}}, i64 [1-9][0-9]*, i64 {{[0-9]+}}, i64 256)
+// CHECK-DAG: "mem.check"(ptr addrspace(200) {{(nonnull )?%[^,)]+}}, i64 {{[^,]+}}, i64 {{[1-9][0-9]*}}, i64 {{[0-9]+}}, i64 256)
+// CHECK-DAG: "mem.check"(ptr addrspace(200) {{(nonnull )?%[^,)]+}}, i64 {{[^,]+}}, i64 {{[1-9][0-9]*}}, i64 {{[0-9]+}}, i64 256)
 // CHECK-DAG: !mem.guard
 // CHECK-DAG: !mem.guard
-// CHECK: ret void
+// CHECK-DAG: ret void
 #[unsafe(no_mangle)]
 pub fn revswap(a: &mut [Vec<u8>], b: &mut [Vec<u8>], n: usize) {
     let mut i = 0;
@@ -58,7 +62,6 @@ pub fn revswap(a: &mut [Vec<u8>], b: &mut [Vec<u8>], n: usize) {
 // CHECK-NOT: !mem.guard
 // CHECK: "mem.check"(ptr addrspace(200) null, i64 {{[^,]+}}, i64 0, i64 {{[0-9]+}}, i64 0)
 // CHECK-NOT: !mem.guard
-// CHECK: ret
 #[unsafe(no_mangle)]
 pub fn blocked(a: &mut &mut [u64], i: usize) -> u64 {
     a[i]
