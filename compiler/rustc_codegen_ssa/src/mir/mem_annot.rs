@@ -683,7 +683,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             match &stmt.kind {
                 StatementKind::StorageLive(_)
                 | StatementKind::StorageDead(_)
-                | StatementKind::Nop => {
+                | StatementKind::Nop
+                // Borrowck inserts these immediately before the guarded `Rvalue::Ref` on a
+                // CHERI target. They are execution no-ops (codegen still emits `!mem.loan` /
+                // `!mem.last_use` from them), so they must not hide that borrow. Any other
+                // statement is still observable and stops the walk.
+                | StatementKind::Intrinsic(
+                    mir::NonDivergingIntrinsic::LoanStart(..)
+                    | mir::NonDivergingIntrinsic::LoanEnd(..),
+                ) => {
                     continue;
                 }
                 StatementKind::Assign(assign) => {
