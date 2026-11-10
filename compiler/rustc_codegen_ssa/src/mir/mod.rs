@@ -149,6 +149,10 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
     /// M5r: `!mem.last_use` loans for the next call `do_call` builds.
     mem_call_last_use: Option<Vec<u64>>,
 
+    /// M7.1a: source slots of moved `Box`/`Vec` values that are still aliased
+    /// by an `OperandValue::Ref`. Flushed once the copy or consuming call is done.
+    mem_move_pending: Vec<Bx::Value>,
+
     /// M5r R3 (D17): `LoanEnd` ids waiting for a carrier, searched from the mark on.
     mem_loan_pending: Option<(Option<Bx::Value>, Vec<u64>)>,
     /// [LLM-generated] D17: loan ends carried into a single-predecessor successor.
@@ -318,6 +322,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         mem_guard_active: None,
         mem_call_bundle: None,
         mem_call_last_use: None,
+        mem_move_pending: Vec::new(),
         mem_loan_pending: None,
         mem_loan_carry: Default::default(),
         mem_slot_pending: None,

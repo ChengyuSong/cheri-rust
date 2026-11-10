@@ -2448,8 +2448,8 @@ options! {
     cheri_annotate: bool = (true, parse_bool, [TRACKED],
         "CHERI M5r: emit the target-neutral memory annotations (`\"mem.check\"` markers, \
          `!mem.guard`, `llvm.mem.claim`, `mem.alloc_inbounds` facts, `\"mem.free\"`, \
-         `!mem.last_use`) for the late LLVM CHERI passes; rustc itself makes no CHERI \
-         decision (default: yes; CHERI targets only)"),
+         `!mem.last_use`, `\"mem.move\"`) for the late LLVM CHERI passes; rustc itself \
+         makes no CHERI decision (default: yes; CHERI targets only)"),
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),

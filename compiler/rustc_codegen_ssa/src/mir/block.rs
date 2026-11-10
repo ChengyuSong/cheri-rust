@@ -258,6 +258,8 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
         fx.mem_prepare_call(bx, llargs, instance);
 
         if kind == CallKind::Tail {
+            // The callee uses the by-move slot. Do not null it in the caller.
+            fx.mem_discard_owner_moves();
             bx.tail_call(
                 fn_ty,
                 caller_attrs,
@@ -296,6 +298,9 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
             if let Some((ret_dest, target)) = destination {
                 bx.switch_to_block(fx.llbb(target));
                 fx.set_debug_loc(bx, self.terminator.source_info);
+                // The invoke has returned on this path. A by-move memory owner
+                // can be nulled now; the success block is the first point after it.
+                fx.mem_flush_owner_moves(bx);
                 for &(tmp, size) in lifetime_ends_after_call {
                     bx.lifetime_end(tmp, size);
                 }
@@ -307,6 +312,9 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 // Update the cached block for `target` to point to this new
                 // block, where codegen will continue.
                 fx.cached_llbbs[target] = CachedLlbb::Some(bx.llbb());
+            } else {
+                // No normal successor to attach the fact to.
+                fx.mem_discard_owner_moves();
             }
             MergingSucc::False
         } else {
@@ -323,6 +331,9 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
             if fx.mir[self.bb].is_cleanup {
                 bx.apply_attrs_to_cleanup_callsite(llret);
             }
+            // Scalar owner moves were emitted at their loads. Memory owners
+            // (Vec) are passed as the slot itself, so the fact follows the call.
+            fx.mem_flush_owner_moves(bx);
 
             if let Some((ret_dest, target)) = destination {
                 for &(tmp, size) in lifetime_ends_after_call {

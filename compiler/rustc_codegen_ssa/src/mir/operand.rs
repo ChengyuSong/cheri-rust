@@ -1137,11 +1137,18 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     mir::Operand::Copy(_) => LangItem::CompilerCopy,
                     _ => unreachable!(),
                 };
+                let is_move = matches!(operand, mir::Operand::Move(_));
 
                 // Check if we should annotate this move/copy for profiling
                 let move_annotation = self.move_copy_annotation_instance(bx, place.as_ref(), kind);
-
-                OperandRef { move_annotation, ..self.codegen_consume(bx, place.as_ref()) }
+                let mut op = self.codegen_consume(bx, place.as_ref());
+                if is_move {
+                    // The load, if any, has already copied a scalar owner into a
+                    // register. A memory operand is queued until its consumer finishes.
+                    self.mem_note_owner_move(bx, place.as_ref(), &op);
+                }
+                op.move_annotation = move_annotation;
+                op
             }
 
             mir::Operand::RuntimeChecks(checks) => {
