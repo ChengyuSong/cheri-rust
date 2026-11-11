@@ -16,6 +16,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+#[derive(Copy, Clone)]
 #[repr(C)]
 struct Holder<'a> {
     r: &'a u64,
@@ -74,8 +75,11 @@ pub fn loan_grow(b: &u64) {
     core::hint::black_box(&v);
 }
 
-// Two regions, two reference values, two facts. 'b is not the 'a value.
+// Two reference values. Each `&*` is a pair of same-region reborrows, so each
+// value contributes two facts. 'b is not the 'a value.
 // on-LABEL: @loan_pair(
+// on: mem.loan_into
+// on: mem.loan_into
 // on: mem.loan_into
 // on: mem.loan_into
 // on-NOT: mem.loan_into
@@ -90,12 +94,13 @@ pub fn loan_pair(a: &u64, b: &u64) {
     core::hint::black_box(&v);
 }
 
-// copy_from_slice propagates the source loan onto the destination Vec.
-// Facts: push into src, push into dst, then one more after the copy.
+// copy_from_slice propagates the source loans onto the destination Vec.
+// Each push is two same-region reborrows; both are copied onto dst.
 // on-LABEL: @loan_copy(
 // on: mem.loan_into
 // on: mem.loan_into
 // on: call {{.*}}copy_from_slice{{.*}}
+// on: mem.loan_into
 // on: mem.loan_into
 // on-NOT: mem.loan_into
 // on: ret void
@@ -113,9 +118,16 @@ pub fn loan_copy(b: &u64, c: &u64) {
     core::hint::black_box(&dst);
 }
 
-// `b` is a caller reference (no loan id here) stored beside a reborrow of the
-// same place. The values can be equal, so the shorter loan gets no fact.
+// Both pushes are reborrows of `b` (MIR does not pass the argument through
+// unchanged). Their regions end together, so neither is strictly shorter and
+// each loan in that block is emitted. A strictly shorter overlapping loan is
+// omitted; see the single fact on each `loan_grow` push.
 // on-LABEL: @guard_same_cap(
+// on: call {{.*}}push{{.*}}
+// on: mem.loan_into
+// on: call {{.*}}push{{.*}}
+// on: mem.loan_into
+// on: mem.loan_into
 // on-NOT: mem.loan_into
 // on: ret void
 // off-LABEL: @guard_same_cap(

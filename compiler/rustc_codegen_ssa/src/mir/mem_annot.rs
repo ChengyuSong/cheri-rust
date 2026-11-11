@@ -39,7 +39,7 @@ use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{self, AssertKind, BasicBlock, Operand, PlaceElem, Rvalue, StatementKind};
 use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf};
-use rustc_middle::ty::{self, Ty, TypeVisitableExt};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
 use rustc_target::callconv::FnAbi;
 
 use super::operand::{OperandRef, OperandValue};
@@ -1968,33 +1968,54 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let mut direct: Vec<(BasicBlock, mir::Local, u64, mir::Local, Carried)> = Vec::new();
         let mut tainted: FxHashSet<mir::Local> = Default::default();
         let mut propagate: Vec<(BasicBlock, mir::Local, mir::Local, u64)> = Vec::new();
-        let mut start_of: FxHashMap<mir::Local, Vec<u64>> = Default::default();
-        for data in mir.basic_blocks.iter() {
+        for (bb, data) in mir.basic_blocks.iter_enumerated() {
+            // Only loans started in this block. Copy-prop parks every reborrow of an
+            // argument on that argument, so a later push must not repeat earlier ids.
+            carries.clear();
             for stmt in &data.statements {
+                // Copy-prop retargets a loan onto the argument it collapsed into, which is
+                // not the destination of a `Ref`. The link local still carries the id.
                 if let StatementKind::Intrinsic(mir::NonDivergingIntrinsic::LoanStart(id, link)) =
                     stmt.kind
                     && link != mir::Local::MAX
                 {
-                    start_of.entry(link).or_default().push(id);
+                    let slot = carries.entry(link).or_default();
+                    if !slot.iter().any(|c| c.id == id && c.fields.is_empty()) {
+                        slot.push(Carried { id, fields: Vec::new() });
+                    }
+                    continue;
                 }
-            }
-        }
-
-        for (bb, data) in mir.basic_blocks.iter_enumerated() {
-            for stmt in &data.statements {
                 let StatementKind::Assign(assign) = &stmt.kind else { continue };
                 let (place, rv) = &**assign;
                 if !place.projection.is_empty() {
+                    // A struct literal is often lowered to `_s.field = copy r`.
+                    if let Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _) = rv
+                        && src.projection.is_empty()
+                        && place.projection.iter().all(|e| matches!(e, PlaceElem::Field(..)))
+                        && let Some(cs) = carries.get(&src.local).cloned()
+                    {
+                        let prefix: Vec<u16> = place
+                            .projection
+                            .iter()
+                            .map(|e| match e {
+                                PlaceElem::Field(f, _) => f.as_usize() as u16,
+                                _ => 0,
+                            })
+                            .collect();
+                        let slot = carries.entry(place.local).or_default();
+                        for c in cs {
+                            let mut fields = prefix.clone();
+                            fields.extend_from_slice(&c.fields);
+                            if !slot.iter().any(|e| e.id == c.id && e.fields == fields) {
+                                slot.push(Carried { id: c.id, fields });
+                            }
+                        }
+                    }
                     continue;
                 }
                 match rv {
                     Rvalue::Ref(_, _, borrowed) => {
                         ref_of.insert(place.local, *borrowed);
-                        if let Some(ids) = start_of.get_mut(&place.local)
-                            && let Some(id) = ids.pop()
-                        {
-                            carries.insert(place.local, vec![Carried { id, fields: Vec::new() }]);
-                        }
                     }
                     Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _)
                         if src.projection.is_empty() =>
@@ -2024,14 +2045,17 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         let mut acc = Vec::new();
                         let mut bad = false;
                         for (i, op) in ops.iter().enumerate() {
-                            let (Operand::Copy(p) | Operand::Move(p)) = op else {
-                                if self.operand_has_ref(op) {
-                                    bad = true;
+                            let p = match op {
+                                Operand::Copy(p) | Operand::Move(p) => *p,
+                                other => {
+                                    if self.operand_has_ref(other) {
+                                        bad = true;
+                                    }
+                                    continue;
                                 }
-                                continue;
                             };
                             if !p.projection.is_empty() {
-                                if self.place_has_ref(*p) {
+                                if self.place_has_ref(p) {
                                     bad = true;
                                 }
                                 continue;
@@ -2054,9 +2078,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     _ => {}
                 }
             }
-            let mir::TerminatorKind::Call { func, args, .. } = &data.terminator().kind else {
+            let mir::TerminatorKind::Call { func, args, destination, .. } =
+                &data.terminator().kind
+            else {
                 continue;
             };
+            self.note_loan_deref(func, args, *destination, &mut ref_of);
             let Some(mode) = self.loan_into_call_mode(func) else { continue };
             let Some(recv) = args.first().and_then(|a| operand_local(&a.node)) else { continue };
             let Some(owner) = self.loan_into_owner(recv, &ref_of) else { continue };
@@ -2156,6 +2183,30 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
     }
 
+    /// `deref` / `deref_mut` of a `Vec` or `Box` yields the slice; the slice local
+    /// stands for that owner so `copy_from_slice` can propagate.
+    fn note_loan_deref(
+        &self,
+        func: &mir::Operand<'tcx>,
+        args: &[rustc_span::Spanned<Operand<'tcx>>],
+        destination: mir::Place<'tcx>,
+        ref_of: &mut FxHashMap<mir::Local, mir::Place<'tcx>>,
+    ) {
+        let Some(dest) = destination.as_local() else { return };
+        let Some((def_id, _)) = func.const_fn_def() else { return };
+        let name = self.cx.tcx().item_name(def_id);
+        if name.as_str() != "deref" && name.as_str() != "deref_mut" {
+            return;
+        }
+        let Some(src) = args.first().and_then(|a| operand_local(&a.node)) else { return };
+        if self.loan_into_owner(src, ref_of).is_none() {
+            return;
+        }
+        if let Some(place) = ref_of.get(&src).copied() {
+            ref_of.insert(dest, place);
+        }
+    }
+
     fn loan_into_call_mode(&self, func: &mir::Operand<'tcx>) -> Option<LoanIntoMode> {
         let (def_id, _) = func.const_fn_def()?;
         let name = self.cx.tcx().item_name(def_id);
@@ -2211,7 +2262,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         } else {
             None
         };
-        inner.is_some_and(|t| ty_has_ref(self.monomorphize(t)))
+        inner.is_some_and(|t| ty_has_ref(self.cx.tcx(), self.monomorphize(t)))
     }
 
     fn loan_into_ptr_offset(&self, ty: Ty<'tcx>) -> Option<u64> {
@@ -2241,16 +2292,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     }
 
     fn local_has_ref(&self, local: mir::Local) -> bool {
-        ty_has_ref(self.monomorphize(self.mir.local_decls[local].ty))
+        ty_has_ref(self.cx.tcx(), self.monomorphize(self.mir.local_decls[local].ty))
     }
 
     fn operand_has_ref(&self, op: &Operand<'tcx>) -> bool {
-        ty_has_ref(self.monomorphize(op.ty(&self.mir.local_decls, self.cx.tcx())))
+        ty_has_ref(self.cx.tcx(), self.monomorphize(op.ty(&self.mir.local_decls, self.cx.tcx())))
     }
 
     fn place_has_ref(&self, place: mir::Place<'tcx>) -> bool {
         let ty = place.ty(&self.mir.local_decls, self.cx.tcx()).ty;
-        ty_has_ref(self.monomorphize(ty))
+        ty_has_ref(self.cx.tcx(), self.monomorphize(ty))
     }
 
     /// Load the reference values for this call's facts before arguments are consumed.
@@ -2375,8 +2426,24 @@ fn operand_local(op: &Operand<'_>) -> Option<mir::Local> {
     }
 }
 
-fn ty_has_ref(ty: Ty<'_>) -> bool {
-    ty.walk().any(|g| g.as_type().is_some_and(|t| t.is_ref()))
+fn ty_has_ref<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    fn go<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, depth: u32) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        if ty.is_ref() {
+            return true;
+        }
+        match *ty.kind() {
+            ty::Adt(def, args) => {
+                def.all_fields().any(|f| go(tcx, f.ty(tcx, args).skip_norm_wip(), depth - 1))
+            }
+            ty::Tuple(ts) => ts.iter().any(|t| go(tcx, t, depth - 1)),
+            ty::Array(t, _) | ty::Slice(t) => go(tcx, t, depth - 1),
+            _ => false,
+        }
+    }
+    go(tcx, ty, 6)
 }
 
 fn operand_field<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
