@@ -138,14 +138,15 @@ pub fn move_repeat() {
     eat_vec(c);
 }
 
-// Return place: from_elem's Vec is copied out. No fact may precede that copy.
+// At -O0, `from_elem` srets straight into this function's return slot.
+// Nothing here moves a local out of that slot, so there is no memcpy and
+// no `mem.move`.
 // on-LABEL: @return_from_elem(
 // on-NOT: mem.move
-// on: call addrspace(200) void @llvm.memcpy
-// on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(
+// on: ret void
 // off-LABEL: @return_from_elem(
 // off-NOT: mem.move
-// off: ret
+// off: ret void
 #[no_mangle]
 pub fn return_from_elem() -> Vec<u64> {
     alloc::vec::from_elem(5u64, 4)

@@ -2142,6 +2142,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         let scratch = PlaceValue::alloca(bx, arg.layout.size, required_align);
                         bx.lifetime_start(scratch.llval, arg.layout.size);
                         op.store_with_annotation(bx, scratch.with_type(arg.layout));
+                        // The memcpy just above is the read of this argument.
+                        // The hook inside it does not leave a fact on this source.
+                        self.mem_move_after_arg_copy(
+                            bx,
+                            op.layout.ty,
+                            op_place_val.llval,
+                            scratch.llval,
+                        );
                         lifetime_ends_after_call.push((scratch.llval, arg.layout.size));
                         (scratch.llval, scratch.align, true)
                     } else {

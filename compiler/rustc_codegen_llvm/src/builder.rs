@@ -1009,6 +1009,12 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         if bytes == 0 {
             return;
         }
+        // A constant (promoted static, constantexpr) is not a stack slot. A
+        // fact on it would ask the backend to null immutable memory.
+        let peeled = mem_move_peel(slot);
+        if unsafe { llvm::LLVMIsAInstruction(peeled) }.is_none() {
+            return;
+        }
         let mut moves = self.cx.mem_moves.borrow_mut();
         if moves.iter().any(|m| !m.retired && mem_move_same(m.slot, slot)) {
             return;
@@ -1028,15 +1034,17 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             else {
                 return;
             };
-            let full = matches!(bytes, Some(n) if n >= m.size);
-            if !full {
-                let fact = m.fact.take();
-                m.retired = true;
-                MemMoveAction::Retire(fact)
-            } else {
+            // Unknown or partial: drop the fact so it cannot sit in front of
+            // this copy. A caller that knows the layout size records a fresh
+            // track after the copy and emits there.
+            if matches!(bytes, Some(n) if n >= m.size) {
                 let slot = m.slot;
                 let fact = m.fact.take();
                 MemMoveAction::Place { slot, fact }
+            } else {
+                let fact = m.fact.take();
+                m.retired = true;
+                MemMoveAction::Retire(fact)
             }
         };
         match action {
@@ -1592,6 +1600,11 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         preserve_tags: rustc_codegen_ssa::common::PreserveCheriTags,
     ) {
         assert!(!flags.contains(MemFlags::NONTEMPORAL), "non-temporal memcpy not supported");
+        // `intcast` of an `isize` constant is not always a ConstantInt, and a
+        // wider-than-64 constant fails `LLVMRustConstIntGetZExtValue`. Read the
+        // count first so a layout-sized copy is not reported as an unknown size
+        // and dropped.
+        let known_bytes = mem_move_const_bytes(size);
         let size = self.intcast(size, self.type_isize(), false);
         let preserve_tags = PreserveCheriTags::from_generic(preserve_tags);
         let is_volatile = flags.contains(MemFlags::VOLATILE);
@@ -1616,7 +1629,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         if let Some(tt) = tt {
             crate::typetree::add_tt(self, memcpy, tt);
         }
-        self.mem_move_read(src, dst, mem_move_const_bytes(size));
+        self.mem_move_read(src, dst, known_bytes.or_else(|| mem_move_const_bytes(size)));
     }
 
     fn memmove(

@@ -544,6 +544,39 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
     }
 
+    /// `memcpy %scratch <- %slot` while passing `%slot` indirectly at `-O0`.
+    ///
+    /// That copy is `OperandValue::Ref::store_with_flags` → `typed_place_copy`
+    /// → `Builder::memcpy`. The memcpy hook only emits when `%slot` is still a
+    /// live track and the size operand is a constant wide enough for it. An
+    /// `intcast` of the length, or a copy taken because the operand is not
+    /// `Operand::Move`, leaves no fact: the hook either never saw the slot or
+    /// retired it. This is the copy `eat_vec` actually reads (`move_vec`,
+    /// `move_repeat`'s `%c`). Record the source and place the fact immediately
+    /// after the store, using the layout size rather than the cast length.
+    pub(crate) fn mem_move_after_arg_copy(
+        &mut self,
+        bx: &mut Bx,
+        ty: Ty<'tcx>,
+        src: Bx::Value,
+        dest: Bx::Value,
+    ) {
+        if !self.mem_annotate() {
+            return;
+        }
+        let bytes = bx.layout_of(ty).size.bytes();
+        if bytes == 0 {
+            return;
+        }
+        if !self.mem_is_unique_owner(ty) {
+            // Still relocate a track that was recorded for this pointer.
+            bx.mem_move_read(src, dest, Some(bytes));
+            return;
+        }
+        bx.mem_move_track(src, bytes);
+        bx.mem_move_read(src, dest, Some(bytes));
+    }
+
     /// The place is a local stack slot, or a constant-offset field of one, or a
     /// dereference of a local pointer. Dynamic indices and subslices are skipped:
     /// the resulting address is not a slot this pass can name precisely.
