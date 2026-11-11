@@ -302,6 +302,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 // Pass-through arguments were read by the invoke. A memcpy of the
                 // same slot later moves the fact again.
                 bx.mem_move_finish_call();
+                fx.mem_loan_into_flush(bx);
                 for &(tmp, size) in lifetime_ends_after_call {
                     bx.lifetime_end(tmp, size);
                 }
@@ -335,6 +336,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
             // A scratch copy already placed the fact after its memcpy; this
             // only moves a fact for slots this call was armed with.
             bx.mem_move_finish_call();
+            fx.mem_loan_into_flush(bx);
 
             if let Some((ret_dest, target)) = destination {
                 for &(tmp, size) in lifetime_ends_after_call {
@@ -1340,6 +1342,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // that extend for the duration of a call. Keep track of those allocations and their sizes
         // to generate `lifetime_end` when the call returns.
         let mut lifetime_ends_after_call: Vec<(Bx::Value, Size)> = Vec::new();
+        // Capture loan values before argument codegen moves them.
+        self.mem_loan_into_preload(bx, helper.bb);
         // Arms recorded while copying these arguments belong to this call.
         bx.mem_move_begin_call();
         'make_args: for (i, arg) in first_args.iter().enumerate() {
@@ -1629,6 +1633,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             None => return,
         };
         let bx = &mut Bx::build(self.cx, llbb);
+        self.mem_codegen_bb = bb;
         let mir = self.mir;
 
         // MIR basic blocks stop at any function call. This may not be the case

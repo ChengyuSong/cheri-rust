@@ -789,6 +789,12 @@ pub struct GlobalCtxt<'tcx> {
     /// dep graph: a missing entry (e.g. under incremental reuse) only loses markers (fail-safe).
     pub cheri_loan_ends: Lock<FxHashMap<LocalDefId, Vec<(crate::mir::Location, u64)>>>,
 
+    /// [LLM-generated] M7.1b: pairs `(shorter, longer)` of borrowck loan keys whose
+    /// borrowed places overlap and `longer` strictly outlives `shorter`. A pair
+    /// `(u64::MAX, u64::MAX)` means the body had too many loans to compare
+    /// (codegen then emits no `mem.loan_into`). Read once at codegen.
+    pub cheri_loan_overlap: Lock<FxHashMap<LocalDefId, Vec<(u64, u64)>>>,
+
     current_gcx: CurrentGcx,
 }
 
@@ -991,6 +997,7 @@ impl<'tcx> TyCtxt<'tcx> {
             data_layout,
             alloc_map: interpret::AllocMap::new(),
             cheri_loan_ends: Default::default(),
+            cheri_loan_overlap: Default::default(),
             current_gcx,
         });
 

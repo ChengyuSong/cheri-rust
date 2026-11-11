@@ -677,6 +677,103 @@ fn record_cheri_loan_ends<'tcx>(
     if !v.is_empty() {
         tcx.cheri_loan_ends.lock().insert(def, v);
     }
+    record_cheri_loan_overlap(tcx, def, body, regioncx, &ended);
+}
+
+/// [LLM-generated] M7.1b: loans of overlapping places, for the same-value guard.
+/// `longer` strictly outlives `shorter` (or the two regions are incomparable, in
+/// which case both directions are recorded so codegen emits nothing).
+fn record_cheri_loan_overlap<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+    body: &Body<'tcx>,
+    regioncx: &RegionInferenceContext<'tcx>,
+    ended: &rustc_data_structures::fx::FxHashSet<usize>,
+) {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_data_structures::fx::FxHasher::default();
+    tcx.def_path_hash(def.to_def_id()).hash(&mut h);
+    let base = h.finish();
+    let key = |n: usize| {
+        let mut h = rustc_data_structures::fx::FxHasher::default();
+        (base, n).hash(&mut h);
+        h.finish() & !CHERI_LOAN_START
+    };
+    let mut loans = Vec::new();
+    let mut reborrow: rustc_data_structures::fx::FxHashMap<Local, Place<'tcx>> = Default::default();
+    let mut n = 0usize;
+    for data in body.basic_blocks.iter() {
+        for stmt in &data.statements {
+            if let StatementKind::Assign(assign) = &stmt.kind
+                && let Rvalue::Ref(region, kind, place) = &assign.1
+                && !matches!(kind, BorrowKind::Fake(_))
+                && region.is_var()
+            {
+                let borrowed = canon_cheri_place(*place, &reborrow);
+                if assign.0.projection.is_empty() {
+                    reborrow.insert(assign.0.local, borrowed);
+                }
+                if ended.contains(&n) {
+                    loans.push((n, region.as_var(), borrowed));
+                }
+                n += 1;
+            }
+        }
+    }
+    if loans.len() > 96 {
+        tcx.cheri_loan_overlap.lock().insert(def, vec![(u64::MAX, u64::MAX)]);
+        return;
+    }
+    let mut pairs = Vec::new();
+    for i in 0..loans.len() {
+        for j in (i + 1)..loans.len() {
+            if !cheri_places_overlap(loans[i].2, loans[j].2) {
+                continue;
+            }
+            let ij = regioncx.eval_outlives(loans[i].1, loans[j].1);
+            let ji = regioncx.eval_outlives(loans[j].1, loans[i].1);
+            if ij && ji {
+                continue;
+            }
+            if ij {
+                pairs.push((key(loans[j].0), key(loans[i].0)));
+            } else if ji {
+                pairs.push((key(loans[i].0), key(loans[j].0)));
+            } else {
+                pairs.push((key(loans[i].0), key(loans[j].0)));
+                pairs.push((key(loans[j].0), key(loans[i].0)));
+            }
+        }
+    }
+    if !pairs.is_empty() {
+        tcx.cheri_loan_overlap.lock().insert(def, pairs);
+    }
+}
+
+/// `*r` is the same memory as the place `r` itself reborrows.
+fn canon_cheri_place<'tcx>(
+    mut place: Place<'tcx>,
+    reborrow: &rustc_data_structures::fx::FxHashMap<Local, Place<'tcx>>,
+) -> Place<'tcx> {
+    for _ in 0..8 {
+        if place.projection.len() == 1
+            && matches!(place.projection[0], PlaceElem::Deref)
+            && let Some(inner) = reborrow.get(&place.local)
+        {
+            place = *inner;
+            continue;
+        }
+        break;
+    }
+    place
+}
+
+/// One borrowed place contains the other (same local, one projection is a prefix).
+fn cheri_places_overlap<'a>(a: Place<'a>, b: Place<'a>) -> bool {
+    if a.local != b.local {
+        return false;
+    }
+    a.projection.iter().zip(b.projection.iter()).all(|(x, y)| x == y)
 }
 
 fn get_flow_results<'a, 'tcx>(

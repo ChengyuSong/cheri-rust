@@ -166,6 +166,12 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
     /// (a plain copy of such a local into memory carries the same loans).
     mem_slot_loans: rustc_data_structures::fx::FxHashMap<mir::Local, Vec<u64>>,
 
+    /// M7.1b: `mem.loan_into` facts for calls in this body, and values already loaded.
+    mem_loan_into: mem_annot::LoanIntoPlan,
+    mem_loan_into_saved: Vec<(u64, Bx::Value, mir::BasicBlock)>,
+    mem_loan_into_ready: Vec<(Bx::Value, Bx::Value, u64)>,
+    mem_codegen_bb: mir::BasicBlock,
+
     /// M5r: simple-case loan last uses of this body.
     mem_last_uses: mem_annot::LastUses,
 
@@ -326,6 +332,10 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         mem_slot_pending_scope: None,
         mem_slot_links: Vec::new(),
         mem_slot_loans: Default::default(),
+        mem_loan_into: Default::default(),
+        mem_loan_into_saved: Vec::new(),
+        mem_loan_into_ready: Vec::new(),
+        mem_codegen_bb: mir::START_BLOCK,
         mem_last_uses: Default::default(),
         mem_stats: Default::default(),
     };
@@ -426,6 +436,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
             .collect()
     };
     fx.initialize_locals(local_values);
+    fx.prepare_loan_into();
 
     // Apply debuginfo to the newly allocated locals.
     fx.debug_introduce_locals(&mut start_bx, consts_debug_info.unwrap_or_default());
