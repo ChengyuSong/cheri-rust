@@ -1,9 +1,11 @@
 // M7.1a [LLM-generated]: a move of Box or Vec out of a local memory place emits
-// `call void @llvm.mem.fact() [ "mem.move"(ptr <slot>) ]`.
+// `call addrspace(200) void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) <slot>) ]`.
 // The pointer is the source slot (alloca, or alloca plus a constant field offset).
-// A scalar owner is loaded first, so the fact follows that load and precedes the
-// call that receives the register. Vec is a memory operand passed by move, so the
-// fact follows the call: the callee still reads the slot.
+// A scalar owner is loaded first, so the fact follows that load.
+// A memory owner emits the fact from the memcpy that reads the slot into a
+// different pointer, or after the call that was passed the slot itself.
+// The fact is not emitted when the move operand is only evaluated: that nulled
+// `vec![elem; n]` / `from_elem` before the copy into the live binding.
 // Gated by `-Zcheri-annotate` on CHERI targets, same as the loan facts.
 //
 //@ revisions: on off
@@ -47,7 +49,7 @@ pub fn touch_slot(slot: &mut Option<Box<u64>>) {
 // on-LABEL: @move_box(
 // on: call {{.*}}@touch_box(
 // on: [[B:%.*]] = load ptr addrspace(200), ptr addrspace(200) [[SLOT:%[0-9A-Za-z._]+]],
-// on-NEXT: call void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) [[SLOT]]) ]
+// on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) [[SLOT]]) ]
 // on: call {{.*}}@eat_box(ptr addrspace(200) [[B]])
 // off-LABEL: @move_box(
 // off-NOT: mem.move
@@ -59,11 +61,14 @@ pub fn move_box() {
     eat_box(b);
 }
 
-// Vec is BackendRepr::Memory, so the move operand aliases the alloca. The fact
-// is the next instruction after the consuming call.
+// Vec is BackendRepr::Memory. At -O0 the call argument is a copy of the local;
+// the fact is the next instruction after that memcpy, naming the source, and
+// only then is eat_vec called. A pass-through of the same alloca would instead
+// put the fact after the call (the call is what reads the slot).
 // on-LABEL: @move_vec(
-// on: call {{.*}}@eat_vec({{.*}}[[V:%[0-9A-Za-z._]+]])
-// on-NEXT: call void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) [[V]]) ]
+// on: call addrspace(200) void @llvm.memcpy{{.*}}[[V:%[0-9A-Za-z._]+]], i64 48,
+// on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) [[V]]) ]
+// on: call {{.*}}@eat_vec(
 // off-LABEL: @move_vec(
 // off-NOT: mem.move
 // off: ret
@@ -77,7 +82,7 @@ pub fn move_vec() {
 // (or the Option that holds it) is moved out of the same alloca.
 // on-LABEL: @move_escaped_box(
 // on: call {{.*}}@touch_slot(
-// on: call void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200)
+// on: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200)
 // on: call {{.*}}@eat_box(
 // off-LABEL: @move_escaped_box(
 // off-NOT: mem.move
@@ -115,6 +120,21 @@ pub fn copy_u64(x: u64) -> u64 {
 pub fn copy_raw(p: *const u64) -> *const u64 {
     let q = p;
     q
+}
+
+// `vec![5; 4]` is `from_elem`. The live binding is a copy of the constructed
+// Vec. No fact may precede that 48-byte copy, and the fact names its source.
+// on-LABEL: @move_repeat(
+// on-NOT: mem.move
+// on: call addrspace(200) void @llvm.memcpy{{.*}}[[SRC:%[0-9A-Za-z._]+]], i64 48,
+// on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) [[SRC]]) ]
+// off-LABEL: @move_repeat(
+// off-NOT: mem.move
+// off: ret
+#[no_mangle]
+pub fn move_repeat() {
+    let c = core::hint::black_box(alloc::vec::from_elem(5u64, 4));
+    eat_vec(c);
 }
 
 // Reborrow is a reference, not a move of an owner.

@@ -137,10 +137,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             | mir::StatementKind::ConstEvalCounter
             | mir::StatementKind::PlaceMention(..)
             | mir::StatementKind::BackwardIncompatibleDropHint { .. }
-            | mir::StatementKind::Nop => {}
+            |             mir::StatementKind::Nop => {}
         }
-        // A statement that copied a moved `Vec` (or other memory owner) has
-        // finished that copy. Scalar moves were already emitted at the load.
-        self.mem_flush_owner_moves(bx);
     }
 }

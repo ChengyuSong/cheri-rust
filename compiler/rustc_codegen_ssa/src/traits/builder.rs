@@ -367,6 +367,26 @@ pub trait BuilderMethods<'a, 'tcx>:
     /// `call void @llvm.mem.fact() [ "<tag>"(ops) ]`.
     fn mem_fact(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
 
+    /// Remember that `slot` was the source of an owner move and still holds the
+    /// value. The fact is emitted from `mem_move_copied` or `mem_move_call_uses`,
+    /// after that read, not when the move operand is merely evaluated.
+    fn mem_move_track(&mut self, _slot: Self::Value) {}
+
+    /// A copy just read `src` into `dest`. Emit `"mem.move"(src)` unless `dest`
+    /// is `src` (the value is still live in that slot).
+    fn mem_move_copied(&mut self, _src: Self::Value, _dest: Self::Value) {}
+
+    /// A call just returned; any tracked slot passed as an argument was read.
+    fn mem_move_call_uses(&mut self, _args: &[Self::Value]) {}
+
+    /// Drop tracked slots that a tail call still owns. Emitting now would null
+    /// them before the callee reads them.
+    fn mem_move_forget(&mut self, _args: &[Self::Value]) {}
+
+    /// Drop every tracked slot. Used at function entry so one function cannot
+    /// emit a fact into the next.
+    fn mem_move_clear(&mut self) {}
+
     /// Attach the operand bundle `"<tag>"(ops)` to the next call/invoke built.
     fn set_next_call_mem_bundle(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
 
@@ -621,7 +641,11 @@ pub trait BuilderMethods<'a, 'tcx>:
                 Some(fnc_tree),
                 PreserveCheriTags::Unknown,
             );
+        } else {
+            return;
         }
+        // The copy has read `src`. A same-pointer copy is not a consume.
+        self.mem_move_copied(src.llval, dst.llval);
     }
 
     /// *Typed* swap for non-overlapping places.

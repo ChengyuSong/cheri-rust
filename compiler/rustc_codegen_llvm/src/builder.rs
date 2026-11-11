@@ -1005,6 +1005,46 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         self.call_intrinsic("llvm.mem.claim", &[self.val_ty(ptr)], &[ptr, bytes, flags])
     }
 
+    fn mem_move_track(&mut self, slot: &'ll Value) {
+        self.cx.mem_move_open.borrow_mut().push(slot);
+    }
+
+    fn mem_move_copied(&mut self, src: &'ll Value, dest: &'ll Value) {
+        if std::ptr::eq(src, dest) {
+            return;
+        }
+        let slot = {
+            let mut open = self.cx.mem_move_open.borrow_mut();
+            let Some(i) = open.iter().position(|s| std::ptr::eq(*s, src)) else { return };
+            open.remove(i)
+        };
+        self.mem_fact("mem.move", &[slot]);
+    }
+
+    fn mem_move_call_uses(&mut self, args: &[&'ll Value]) {
+        let matched: Vec<&'ll Value> = {
+            let open = self.cx.mem_move_open.borrow();
+            args.iter()
+                .filter(|arg| open.iter().any(|slot| std::ptr::eq(*slot, **arg)))
+                .copied()
+                .collect()
+        };
+        for arg in matched {
+            self.cx.mem_move_open.borrow_mut().retain(|slot| !std::ptr::eq(*slot, arg));
+            self.mem_fact("mem.move", &[arg]);
+        }
+    }
+
+    fn mem_move_forget(&mut self, args: &[&'ll Value]) {
+        self.cx.mem_move_open.borrow_mut().retain(|slot| {
+            !args.iter().any(|arg| std::ptr::eq(*slot, *arg))
+        });
+    }
+
+    fn mem_move_clear(&mut self) {
+        self.cx.mem_move_open.borrow_mut().clear();
+    }
+
     fn mem_fact(&mut self, tag: &'static str, ops: &[&'ll Value]) {
         if mem_off("fact") {
             return;
@@ -1523,6 +1563,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         if let Some(tt) = tt {
             crate::typetree::add_tt(self, memcpy, tt);
         }
+        // A moved-from owner slot is read by this copy. Emit the fact now, after
+        // the memcpy, so a later pass cannot null the slot while this copy still
+        // reads it. A copy onto the same pointer is not a consume.
+        self.mem_move_copied(src, dst);
     }
 
     fn memmove(

@@ -163,6 +163,8 @@ pub(crate) struct FullCx<'ll, 'tcx> {
     pub mem_pending_bundle: RefCell<Option<(&'static str, Vec<&'ll Value>)>>,
     /// M5r: `!mem.last_use` loan ids for the next `call`/`invoke` built in this CGU.
     pub mem_pending_last_use: RefCell<Option<Vec<u64>>>,
+    /// M7.1a: owner slots moved from, still waiting for the copy or call that reads them.
+    pub mem_move_open: RefCell<Vec<&'ll Value>>,
 
     /// Cache of Objective-C class references
     pub objc_classrefs: RefCell<FxHashMap<Symbol, &'ll Value>>,
@@ -779,6 +781,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
                 objc_class_t: Cell::new(None),
                 mem_pending_bundle: RefCell::new(None),
                 mem_pending_last_use: RefCell::new(None),
+                mem_move_open: RefCell::new(Vec::new()),
                 objc_classrefs: Default::default(),
                 objc_selrefs: Default::default(),
                 offload_globals: Default::default(),

@@ -17,10 +17,11 @@
 //! - `!mem.last_use !{loan}` on the last use of simple loans (see `find_last_uses`).
 //! - `call void @llvm.mem.fact() [ "mem.move"(ptr) ]` after a move of `Box` or `Vec`
 //!   (or `Option` of those) out of a local memory place (M7.1a). The operand is the
-//!   source slot. A scalar is loaded first, so the fact follows that load. A memory
-//!   operand still aliases the slot, so the fact waits until the copy or the call
-//!   that consumed it has finished. `-Zcheri-annotate` on a CHERI target gates it,
-//!   the same as the loan facts.
+//!   source slot. A scalar load emits it immediately after the load. A memory operand
+//!   emits it from the `memcpy` that reads the slot into a different pointer, or after
+//!   the call that was passed the slot. It is not emitted when the move operand is
+//!   evaluated, so a later copy cannot read a nulled capability. `-Zcheri-annotate`
+//!   on a CHERI target gates it, the same as the loan facts.
 //!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
@@ -498,12 +499,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     }
 
     /// M7.1a: a `Box` / `Vec` (or `Option` of those) was just loaded or aliased by
-    /// `Operand::Move`. Emit `llvm.mem.fact() [ "mem.move"(slot) ]` once the source
-    /// slot no longer holds the live value. Scalar loads already copied the owner
-    /// into registers, so the slot is stale and the fact is emitted here. A memory
-    /// operand is still that slot; nulling it before the copy or the by-move call
-    /// would destroy the value the new owner is about to read, so the slot is queued
-    /// until `mem_flush_owner_moves`.
+    /// `Operand::Move`. A scalar load has already copied the owner into a register,
+    /// so the slot is stale and the fact is emitted here. A memory operand is still
+    /// that slot: it is only tracked. `memcpy` / `mem_move_copied` emits the fact
+    /// after a copy into a different pointer, and `mem_move_call_uses` emits it
+    /// after a call that was passed the slot itself. Emitting at operand evaluation
+    /// or at the next statement boundary nulls the slot before a later copy reads it
+    /// (`black_box(vec![elem; n])` / inlined `from_elem`).
     pub(crate) fn mem_note_owner_move(
         &mut self,
         bx: &mut Bx,
@@ -530,26 +532,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 bx.mem_fact("mem.move", &[cg.val.llval]);
             }
             OperandValue::Ref(pv) if pv.llextra.is_none() => {
-                self.mem_move_pending.push(pv.llval);
+                bx.mem_move_track(pv.llval);
             }
             OperandValue::Ref(_) | OperandValue::ZeroSized => {}
         }
-    }
-
-    /// Emit queued `"mem.move"` facts. Call only after the moved memory has been
-    /// copied or the call that received the slot has returned.
-    pub(crate) fn mem_flush_owner_moves(&mut self, bx: &mut Bx) {
-        if self.mem_move_pending.is_empty() {
-            return;
-        }
-        for slot in std::mem::take(&mut self.mem_move_pending) {
-            bx.mem_fact("mem.move", &[slot]);
-        }
-    }
-
-    /// Drop queued facts without emitting them. A tail call keeps using the slot.
-    pub(crate) fn mem_discard_owner_moves(&mut self) {
-        self.mem_move_pending.clear();
     }
 
     /// The place is a local stack slot, or a constant-offset field of one, or a
