@@ -1005,44 +1005,97 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         self.call_intrinsic("llvm.mem.claim", &[self.val_ty(ptr)], &[ptr, bytes, flags])
     }
 
-    fn mem_move_track(&mut self, slot: &'ll Value) {
-        self.cx.mem_move_open.borrow_mut().push(slot);
-    }
-
-    fn mem_move_copied(&mut self, src: &'ll Value, dest: &'ll Value) {
-        if std::ptr::eq(src, dest) {
+    fn mem_move_track(&mut self, slot: &'ll Value, bytes: u64) {
+        if bytes == 0 {
             return;
         }
-        let slot = {
-            let mut open = self.cx.mem_move_open.borrow_mut();
-            let Some(i) = open.iter().position(|s| std::ptr::eq(*s, src)) else { return };
-            open.remove(i)
-        };
-        self.mem_fact("mem.move", &[slot]);
+        let mut moves = self.cx.mem_moves.borrow_mut();
+        if moves.iter().any(|m| !m.retired && mem_move_same(m.slot, slot)) {
+            return;
+        }
+        moves.push(crate::context::MemMove { slot, size: bytes, fact: None, retired: false });
     }
 
-    fn mem_move_call_uses(&mut self, args: &[&'ll Value]) {
-        let matched: Vec<&'ll Value> = {
-            let open = self.cx.mem_move_open.borrow();
-            args.iter()
-                .filter(|arg| open.iter().any(|slot| std::ptr::eq(*slot, **arg)))
-                .copied()
-                .collect()
+    fn mem_move_read(&mut self, src: &'ll Value, dest: &'ll Value, bytes: Option<u64>) {
+        // A copy onto the same storage does not end the value. A later copy to
+        // a different pointer still sees the bytes here, so it must own the fact.
+        if mem_move_same(src, dest) {
+            return;
+        }
+        let action = {
+            let mut moves = self.cx.mem_moves.borrow_mut();
+            let Some(m) = moves.iter_mut().find(|m| !m.retired && mem_move_same(m.slot, src))
+            else {
+                return;
+            };
+            let full = matches!(bytes, Some(n) if n >= m.size);
+            if !full {
+                let fact = m.fact.take();
+                m.retired = true;
+                MemMoveAction::Retire(fact)
+            } else {
+                let slot = m.slot;
+                let fact = m.fact.take();
+                MemMoveAction::Place { slot, fact }
+            }
         };
-        for arg in matched {
-            self.cx.mem_move_open.borrow_mut().retain(|slot| !std::ptr::eq(*slot, arg));
-            self.mem_fact("mem.move", &[arg]);
+        match action {
+            MemMoveAction::Retire(fact) => erase_move_fact(fact),
+            MemMoveAction::Place { slot, fact } => {
+                erase_move_fact(fact);
+                self.mem_fact("mem.move", &[slot]);
+                let inst = unsafe {
+                    llvm::LLVMGetLastInstruction(llvm::LLVMGetInsertBlock(self.llbuilder))
+                };
+                if let Some(m) = self
+                    .cx
+                    .mem_moves
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|m| !m.retired && mem_move_same(m.slot, slot))
+                {
+                    m.fact = inst;
+                }
+            }
         }
     }
 
-    fn mem_move_forget(&mut self, args: &[&'ll Value]) {
-        self.cx.mem_move_open.borrow_mut().retain(|slot| {
-            !args.iter().any(|arg| std::ptr::eq(*slot, *arg))
-        });
+    fn mem_move_begin_call(&mut self) {
+        self.cx.mem_call_frames.borrow_mut().push(Vec::new());
+    }
+
+    fn mem_move_arm_call(&mut self, slot: &'ll Value) {
+        let tracked = self
+            .cx
+            .mem_moves
+            .borrow()
+            .iter()
+            .any(|m| !m.retired && mem_move_same(m.slot, slot));
+        if !tracked {
+            return;
+        }
+        let mut frames = self.cx.mem_call_frames.borrow_mut();
+        if let Some(frame) = frames.last_mut() {
+            frame.push(slot);
+        }
+    }
+
+    fn mem_move_finish_call(&mut self) {
+        let Some(frame) = self.cx.mem_call_frames.borrow_mut().pop() else { return };
+        let distinct = self.cx.const_null(self.cx.type_ptr());
+        for slot in frame {
+            // The callee read the whole slot. A later memcpy of it relocates the fact.
+            self.mem_move_read(slot, distinct, Some(u64::MAX));
+        }
+    }
+
+    fn mem_move_abort_call(&mut self) {
+        self.cx.mem_call_frames.borrow_mut().pop();
     }
 
     fn mem_move_clear(&mut self) {
-        self.cx.mem_move_open.borrow_mut().clear();
+        self.cx.mem_moves.borrow_mut().clear();
+        self.cx.mem_call_frames.borrow_mut().clear();
     }
 
     fn mem_fact(&mut self, tag: &'static str, ops: &[&'ll Value]) {
@@ -1563,10 +1616,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         if let Some(tt) = tt {
             crate::typetree::add_tt(self, memcpy, tt);
         }
-        // A moved-from owner slot is read by this copy. Emit the fact now, after
-        // the memcpy, so a later pass cannot null the slot while this copy still
-        // reads it. A copy onto the same pointer is not a consume.
-        self.mem_move_copied(src, dst);
+        self.mem_move_read(src, dst, mem_move_const_bytes(size));
     }
 
     fn memmove(
@@ -2604,6 +2654,51 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
         index: &'ll Value,
     ) {
         self.call_intrinsic("llvm.instrprof.increment", &[], &[fn_name, hash, num_counters, index]);
+    }
+}
+
+enum MemMoveAction<'ll> {
+    Retire(Option<&'ll Value>),
+    Place { slot: &'ll Value, fact: Option<&'ll Value> },
+}
+
+/// Bitcasts and addrspacecasts of one alloca compare equal. A copy through a
+/// cast is still the same slot; treating the cast as a different pointer emits
+/// `mem.move` before the real `memcpy`.
+fn mem_move_same(a: &llvm::Value, b: &llvm::Value) -> bool {
+    std::ptr::eq(mem_move_peel(a), mem_move_peel(b))
+}
+
+fn mem_move_peel(mut v: &llvm::Value) -> &llvm::Value {
+    for _ in 0..8 {
+        if unsafe { llvm::LLVMIsAInstruction(v) }.is_none() {
+            break;
+        }
+        let op = unsafe { llvm::LLVMGetInstructionOpcode(v) };
+        if op != llvm::Opcode::BitCast && op != llvm::Opcode::AddrSpaceCast {
+            break;
+        }
+        match unsafe { llvm::LLVMGetOperand(v, 0) } {
+            Some(next) => v = next,
+            None => break,
+        }
+    }
+    v
+}
+
+fn mem_move_const_bytes(size: &llvm::Value) -> Option<u64> {
+    let constant = unsafe { llvm::LLVMIsAConstantInt(size) }?;
+    let mut n = 0u64;
+    if unsafe { llvm::LLVMRustConstIntGetZExtValue(constant, &mut n) } {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+fn erase_move_fact(fact: Option<&llvm::Value>) {
+    if let Some(fact) = fact {
+        unsafe { llvm::LLVMInstructionEraseFromParent(fact) };
     }
 }
 

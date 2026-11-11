@@ -202,6 +202,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 );
                 bx.abort();
                 bx.unreachable();
+                bx.mem_move_abort_call();
                 return MergingSucc::False;
             }
         }
@@ -259,7 +260,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
 
         if kind == CallKind::Tail {
             // The callee reads the by-move slot. Do not null it in the caller.
-            bx.mem_move_forget(llargs);
+            bx.mem_move_abort_call();
             bx.tail_call(
                 fn_ty,
                 caller_attrs,
@@ -298,9 +299,9 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
             if let Some((ret_dest, target)) = destination {
                 bx.switch_to_block(fx.llbb(target));
                 fx.set_debug_loc(bx, self.terminator.source_info);
-                // Pass-through arguments were read by the invoke. Copies already
-                // emitted their fact from the memcpy.
-                bx.mem_move_call_uses(llargs);
+                // Pass-through arguments were read by the invoke. A memcpy of the
+                // same slot later moves the fact again.
+                bx.mem_move_finish_call();
                 for &(tmp, size) in lifetime_ends_after_call {
                     bx.lifetime_end(tmp, size);
                 }
@@ -313,7 +314,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 // block, where codegen will continue.
                 fx.cached_llbbs[target] = CachedLlbb::Some(bx.llbb());
             } else {
-                bx.mem_move_forget(llargs);
+                bx.mem_move_abort_call();
             }
             MergingSucc::False
         } else {
@@ -330,9 +331,10 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
             if fx.mir[self.bb].is_cleanup {
                 bx.apply_attrs_to_cleanup_callsite(llret);
             }
-            // A by-move argument that was not copied is still the callee's slot.
-            // The fact follows the call. A scratch copy already emitted it.
-            bx.mem_move_call_uses(llargs);
+            // A by-move argument that was not copied was read by the call.
+            // A scratch copy already placed the fact after its memcpy; this
+            // only moves a fact for slots this call was armed with.
+            bx.mem_move_finish_call();
 
             if let Some((ret_dest, target)) = destination {
                 for &(tmp, size) in lifetime_ends_after_call {
@@ -749,6 +751,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.set_debug_loc(bx, *source_info);
         }
 
+        bx.mem_move_begin_call();
+        bx.mem_move_arm_call(place.val.llval);
         helper.do_call(
             self,
             bx,
@@ -866,6 +870,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let (fn_abi, llfn, instance) = common::build_langcall(bx, span, lang_item);
 
         // Codegen the actual panic invoke/call.
+        bx.mem_move_begin_call();
         let merging_succ = helper.do_call(
             self,
             bx,
@@ -898,6 +903,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let (fn_abi, llfn, instance) = common::build_langcall(bx, span, reason.lang_item());
 
         // Codegen the actual panic invoke/call.
+        bx.mem_move_begin_call();
         let merging_succ = helper.do_call(
             self,
             bx,
@@ -968,6 +974,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             common::build_langcall(bx, source_info.span, LangItem::PanicNounwind);
 
         // Codegen the actual panic invoke/call.
+        bx.mem_move_begin_call();
         Some(helper.do_call(
             self,
             bx,
@@ -1333,6 +1340,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // that extend for the duration of a call. Keep track of those allocations and their sizes
         // to generate `lifetime_end` when the call returns.
         let mut lifetime_ends_after_call: Vec<(Bx::Value, Size)> = Vec::new();
+        // Arms recorded while copying these arguments belong to this call.
+        bx.mem_move_begin_call();
         'make_args: for (i, arg) in first_args.iter().enumerate() {
             let mut op = self.codegen_operand(bx, &arg.node);
 
@@ -2136,10 +2145,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         lifetime_ends_after_call.push((scratch.llval, arg.layout.size));
                         (scratch.llval, scratch.align, true)
                     } else {
+                        // The callee reads this slot. A later memcpy of it
+                        // moves the fact to after that copy.
+                        bx.mem_move_arm_call(op_place_val.llval);
                         (op_place_val.llval, op_place_val.align, true)
                     }
                 }
-                _ => (op_place_val.llval, op_place_val.align, true),
+                _ => {
+                    bx.mem_move_arm_call(op_place_val.llval);
+                    (op_place_val.llval, op_place_val.align, true)
+                }
             },
             ZeroSized => match arg.mode {
                 PassMode::Indirect { mode, .. } => {

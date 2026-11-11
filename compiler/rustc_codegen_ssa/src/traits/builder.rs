@@ -367,24 +367,32 @@ pub trait BuilderMethods<'a, 'tcx>:
     /// `call void @llvm.mem.fact() [ "<tag>"(ops) ]`.
     fn mem_fact(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
 
-    /// Remember that `slot` was the source of an owner move and still holds the
-    /// value. The fact is emitted from `mem_move_copied` or `mem_move_call_uses`,
-    /// after that read, not when the move operand is merely evaluated.
-    fn mem_move_track(&mut self, _slot: Self::Value) {}
+    /// Remember that `slot` (`bytes` wide) was the source of an owner move and
+    /// still holds the value. No fact is emitted yet.
+    fn mem_move_track(&mut self, _slot: Self::Value, _bytes: u64) {}
 
-    /// A copy just read `src` into `dest`. Emit `"mem.move"(src)` unless `dest`
-    /// is `src` (the value is still live in that slot).
-    fn mem_move_copied(&mut self, _src: Self::Value, _dest: Self::Value) {}
+    /// `src` was just read by a copy of `bytes` into `dest` (`None` if the byte
+    /// count is not a constant). A full copy into a different pointer places
+    /// `"mem.move"(src)` immediately after this copy, moving any earlier fact
+    /// for that slot. A same-pointer copy is ignored. A partial or unknown-size
+    /// read retires the slot and deletes any fact.
+    fn mem_move_read(&mut self, _src: Self::Value, _dest: Self::Value, _bytes: Option<u64>) {}
 
-    /// A call just returned; any tracked slot passed as an argument was read.
-    fn mem_move_call_uses(&mut self, _args: &[Self::Value]) {}
+    /// Start a call frame so pass-through arguments are attributed to this call,
+    /// not to a nested one.
+    fn mem_move_begin_call(&mut self) {}
 
-    /// Drop tracked slots that a tail call still owns. Emitting now would null
-    /// them before the callee reads them.
-    fn mem_move_forget(&mut self, _args: &[Self::Value]) {}
+    /// This call will receive `slot` by value with no preceding copy.
+    fn mem_move_arm_call(&mut self, _slot: Self::Value) {}
 
-    /// Drop every tracked slot. Used at function entry so one function cannot
-    /// emit a fact into the next.
+    /// The call returned. Each armed slot was read; place its fact after the call.
+    fn mem_move_finish_call(&mut self) {}
+
+    /// The call does not return to a normal successor. Drop its armed slots
+    /// without emitting; a fact here would precede the callee's read.
+    fn mem_move_abort_call(&mut self) {}
+
+    /// Drop every tracked slot. Used at function entry.
     fn mem_move_clear(&mut self) {}
 
     /// Attach the operand bundle `"<tag>"(ops)` to the next call/invoke built.
@@ -611,6 +619,7 @@ pub trait BuilderMethods<'a, 'tcx>:
             let ty = self.backend_type(layout);
             let val = self.load_from_place(ty, src);
             self.store_to_place_with_flags(val, dst, flags);
+            self.mem_move_read(src.llval, dst.llval, Some(layout.size.bytes()));
         } else if self.sess().opts.optimize == OptLevel::No
             && layout.backend_repr.is_scalar_or_simd()
         {
@@ -618,6 +627,7 @@ pub trait BuilderMethods<'a, 'tcx>:
             // isn't useful, so just load-store the value for smaller code.
             let temp = self.load_operand(src.with_type(layout));
             temp.val.store_with_flags(self, dst.with_type(layout), flags);
+            self.mem_move_read(src.llval, dst.llval, Some(layout.size.bytes()));
         } else if !layout.is_zst() {
             let tt = typetree_from_ty(self.tcx(), layout.ty);
             // We seem to pass all values to memcpy with one more indirection.
@@ -641,11 +651,8 @@ pub trait BuilderMethods<'a, 'tcx>:
                 Some(fnc_tree),
                 PreserveCheriTags::Unknown,
             );
-        } else {
-            return;
+            // `memcpy` records the read itself.
         }
-        // The copy has read `src`. A same-pointer copy is not a consume.
-        self.mem_move_copied(src.llval, dst.llval);
     }
 
     /// *Typed* swap for non-overlapping places.

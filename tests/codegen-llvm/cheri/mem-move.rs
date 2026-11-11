@@ -50,7 +50,7 @@ pub fn touch_slot(slot: &mut Option<Box<u64>>) {
 // on: call {{.*}}@touch_box(
 // on: [[B:%.*]] = load ptr addrspace(200), ptr addrspace(200) [[SLOT:%[0-9A-Za-z._]+]],
 // on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) [[SLOT]]) ]
-// on: call {{.*}}@eat_box(ptr addrspace(200) [[B]])
+// on: call {{.*}}@eat_box({{.*}}[[B]])
 // off-LABEL: @move_box(
 // off-NOT: mem.move
 // off: ret
@@ -122,12 +122,13 @@ pub fn copy_raw(p: *const u64) -> *const u64 {
     q
 }
 
-// `vec![5; 4]` is `from_elem`. The live binding is a copy of the constructed
-// Vec. No fact may precede that 48-byte copy, and the fact names its source.
+// from_elem's temporary may already have a fact (after the call that read it).
+// The later copy into eat_vec's argument is a different slot: that memcpy's
+// source gets the next fact. Do not reject the earlier fact.
 // on-LABEL: @move_repeat(
-// on-NOT: mem.move
-// on: call addrspace(200) void @llvm.memcpy{{.*}}[[SRC:%[0-9A-Za-z._]+]], i64 48,
+// on: @llvm.memcpy{{.*}}[[ARG:%[0-9A-Za-z._]+]],{{.*}}[[SRC:%[0-9A-Za-z._]+]], i64 48,
 // on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(ptr addrspace(200) [[SRC]]) ]
+// on: call {{.*}}@eat_vec({{.*}}[[ARG]]
 // off-LABEL: @move_repeat(
 // off-NOT: mem.move
 // off: ret
@@ -135,6 +136,34 @@ pub fn copy_raw(p: *const u64) -> *const u64 {
 pub fn move_repeat() {
     let c = core::hint::black_box(alloc::vec::from_elem(5u64, 4));
     eat_vec(c);
+}
+
+// Return place: from_elem's Vec is copied out. No fact may precede that copy.
+// on-LABEL: @return_from_elem(
+// on-NOT: mem.move
+// on: call addrspace(200) void @llvm.memcpy
+// on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(
+// off-LABEL: @return_from_elem(
+// off-NOT: mem.move
+// off: ret
+#[no_mangle]
+pub fn return_from_elem() -> Vec<u64> {
+    alloc::vec::from_elem(5u64, 4)
+}
+
+// CString::spec_new_impl shape: fill a Vec, then move it out.
+// on-LABEL: @move_buffer(
+// on-NOT: mem.move
+// on: call addrspace(200) void @llvm.memcpy
+// on-NEXT: call addrspace(200) void @llvm.mem.fact() [ "mem.move"(
+// off-LABEL: @move_buffer(
+// off-NOT: mem.move
+// off: ret
+#[no_mangle]
+pub fn move_buffer() -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(4);
+    buffer.extend_from_slice(b"hi");
+    buffer
 }
 
 // Reborrow is a reference, not a move of an owner.

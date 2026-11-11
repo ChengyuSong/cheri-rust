@@ -91,6 +91,16 @@ pub(crate) type SimpleCx<'ll> = GenericCx<'ll, SCx<'ll>>;
 /// All other LLVM data structures in the `CodegenCx` are tied to that `llvm::Context`.
 pub(crate) type CodegenCx<'ll, 'tcx> = GenericCx<'ll, FullCx<'ll, 'tcx>>;
 
+/// One moved-from owner slot. `fact` is the current `"mem.move"` call, always
+/// after the last full read we have seen. `retired` means a later read was not
+/// a full copy into other storage, so emitting a fact would be inexact.
+pub(crate) struct MemMove<'ll> {
+    pub(crate) slot: &'ll Value,
+    pub(crate) size: u64,
+    pub(crate) fact: Option<&'ll Value>,
+    pub(crate) retired: bool,
+}
+
 pub(crate) struct FullCx<'ll, 'tcx> {
     pub tcx: TyCtxt<'tcx>,
     pub bitcode_needed: bool,
@@ -163,8 +173,12 @@ pub(crate) struct FullCx<'ll, 'tcx> {
     pub mem_pending_bundle: RefCell<Option<(&'static str, Vec<&'ll Value>)>>,
     /// M5r: `!mem.last_use` loan ids for the next `call`/`invoke` built in this CGU.
     pub mem_pending_last_use: RefCell<Option<Vec<u64>>>,
-    /// M7.1a: owner slots moved from, still waiting for the copy or call that reads them.
-    pub mem_move_open: RefCell<Vec<&'ll Value>>,
+    /// M7.1a: owner slots moved from. The fact, if any, is kept after the last
+    /// full read of the slot. A partial or unknown read retires the slot with
+    /// no fact: a fact that would precede a later read is worse than a miss.
+    pub mem_moves: RefCell<Vec<MemMove<'ll>>>,
+    /// Nested calls. Each frame lists slots passed by value with no copy.
+    pub mem_call_frames: RefCell<Vec<Vec<&'ll Value>>>,
 
     /// Cache of Objective-C class references
     pub objc_classrefs: RefCell<FxHashMap<Symbol, &'ll Value>>,
@@ -781,7 +795,8 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
                 objc_class_t: Cell::new(None),
                 mem_pending_bundle: RefCell::new(None),
                 mem_pending_last_use: RefCell::new(None),
-                mem_move_open: RefCell::new(Vec::new()),
+                mem_moves: RefCell::new(Vec::new()),
+                mem_call_frames: RefCell::new(Vec::new()),
                 objc_classrefs: Default::default(),
                 objc_selrefs: Default::default(),
                 offload_globals: Default::default(),

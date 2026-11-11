@@ -17,11 +17,11 @@
 //! - `!mem.last_use !{loan}` on the last use of simple loans (see `find_last_uses`).
 //! - `call void @llvm.mem.fact() [ "mem.move"(ptr) ]` after a move of `Box` or `Vec`
 //!   (or `Option` of those) out of a local memory place (M7.1a). The operand is the
-//!   source slot. A scalar load emits it immediately after the load. A memory operand
-//!   emits it from the `memcpy` that reads the slot into a different pointer, or after
-//!   the call that was passed the slot. It is not emitted when the move operand is
-//!   evaluated, so a later copy cannot read a nulled capability. `-Zcheri-annotate`
-//!   on a CHERI target gates it, the same as the loan facts.
+//!   source slot. A scalar load records a read. A memory operand records the slot
+//!   and does not emit yet. Each later full-size copy into a different pointer, or
+//!   a by-value call that is handed the slot, moves the single fact to after that
+//!   read. A partial copy retires the slot with no fact. `-Zcheri-annotate` on a
+//!   CHERI target gates it, the same as the loan facts.
 //!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
@@ -499,13 +499,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     }
 
     /// M7.1a: a `Box` / `Vec` (or `Option` of those) was just loaded or aliased by
-    /// `Operand::Move`. A scalar load has already copied the owner into a register,
-    /// so the slot is stale and the fact is emitted here. A memory operand is still
-    /// that slot: it is only tracked. `memcpy` / `mem_move_copied` emits the fact
-    /// after a copy into a different pointer, and `mem_move_call_uses` emits it
-    /// after a call that was passed the slot itself. Emitting at operand evaluation
-    /// or at the next statement boundary nulls the slot before a later copy reads it
-    /// (`black_box(vec![elem; n])` / inlined `from_elem`).
+    /// `Operand::Move`. The slot is tracked. A scalar load is one full read. A
+    /// memory operand is not consumed until a later full-size copy into a different
+    /// pointer, or a by-value call that is handed the slot. Each such read moves
+    /// the single fact to immediately after itself, so an earlier copy or an
+    /// inlined return cannot leave `mem.move` before a later `memcpy`
+    /// (`from_elem`, `CString::spec_new_impl`). A partial copy drops the fact.
     pub(crate) fn mem_note_owner_move(
         &mut self,
         bx: &mut Bx,
@@ -529,10 +528,17 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 if cg.layout.is_unsized() || cg.val.llextra.is_some() {
                     return;
                 }
-                bx.mem_fact("mem.move", &[cg.val.llval]);
+                let bytes = cg.layout.size.bytes();
+                bx.mem_move_track(cg.val.llval, bytes);
+                // The load copied the owner into a register. `const_null` is a
+                // destination that is not the slot, so this counts as a full read.
+                // A later full `memcpy` of the slot moves the fact to after that copy.
+                let elsewhere = bx.const_null(bx.type_ptr());
+                bx.mem_move_read(cg.val.llval, elsewhere, Some(bytes));
             }
             OperandValue::Ref(pv) if pv.llextra.is_none() => {
-                bx.mem_move_track(pv.llval);
+                let bytes = bx.layout_of(ty).size.bytes();
+                bx.mem_move_track(pv.llval, bytes);
             }
             OperandValue::Ref(_) | OperandValue::ZeroSized => {}
         }

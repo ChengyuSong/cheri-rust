@@ -1191,6 +1191,8 @@ unsafe extern "C" {
 
     // Operations on instructions
     pub(crate) fn LLVMIsAInstruction(Val: &Value) -> Option<&Value>;
+    pub(crate) fn LLVMGetInstructionOpcode(Inst: &Value) -> Opcode;
+    pub(crate) fn LLVMInstructionEraseFromParent(Inst: &Value);
     pub(crate) fn LLVMIsAGetElementPtrInst(Val: &Value) -> Option<&Value>;
     // M5r: instruction walking for `!mem.last_use` placement.
     pub(crate) fn LLVMGetFirstInstruction(BB: &BasicBlock) -> Option<&Value>;
