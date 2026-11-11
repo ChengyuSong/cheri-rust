@@ -1964,6 +1964,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let mut carries: FxHashMap<mir::Local, Vec<Carried>> = Default::default();
         let mut unknown: FxHashSet<mir::Local> = Default::default();
         let mut ref_of: FxHashMap<mir::Local, mir::Place<'tcx>> = Default::default();
+        // A local that holds the buffer pointer (or a slice/ref of it) of an owner.
+        let mut buf_owner: FxHashMap<mir::Local, mir::Local> = Default::default();
         // bb, owner, ptr-field offset, local that holds the reference, loan.
         let mut direct: Vec<(BasicBlock, mir::Local, u64, mir::Local, Carried)> = Vec::new();
         let mut tainted: FxHashSet<mir::Local> = Default::default();
@@ -1987,6 +1989,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
                 let StatementKind::Assign(assign) = &stmt.kind else { continue };
                 let (place, rv) = &**assign;
+                if place.projection.is_empty() {
+                    self.note_buf_owner(rv, place.local, &mut buf_owner);
+                }
                 if !place.projection.is_empty() {
                     // A struct literal is often lowered to `_s.field = copy r`.
                     if let Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _) = rv
@@ -2015,7 +2020,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
                 match rv {
                     Rvalue::Ref(_, _, borrowed) => {
-                        ref_of.insert(place.local, *borrowed);
+                        if let Some(owner) = self.ref_buf_owner(*borrowed, &buf_owner) {
+                            ref_of.insert(place.local, mir::Place::from(owner));
+                        } else {
+                            ref_of.insert(place.local, *borrowed);
+                        }
                     }
                     Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _)
                         if src.projection.is_empty() =>
@@ -2093,7 +2102,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 LoanIntoMode::Store => {
                     for arg in args.iter().skip(1) {
                         let Some(local) = operand_local(&arg.node) else {
-                            if self.operand_has_ref(&arg.node) {
+                            // A reference we cannot name may alias a loan value.
+                            // A struct that merely contains one does not: its loans were
+                            // recorded when it was built, and tainting here would drop them.
+                            if self.monomorphize(arg.node.ty(&mir.local_decls, self.cx.tcx())).is_ref()
+                            {
                                 tainted.insert(owner);
                             }
                             continue;
@@ -2113,7 +2126,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                     ));
                                 }
                             }
-                            _ if self.local_has_ref(local) => {
+                            _ if self.monomorphize(mir.local_decls[local].ty).is_ref() => {
                                 tainted.insert(owner);
                             }
                             _ => {}
@@ -2157,7 +2170,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 .filter(|f| f.1 == src)
                 .map(|f| (f.3, Carried { id: f.4.id, fields: f.4.fields.clone() }))
                 .collect();
+            let mut seen = FxHashSet::default();
             for (value_local, c) in copied {
+                if !seen.insert(c.id) {
+                    continue;
+                }
                 flows.push((bb, dest, offset, value_local, c));
             }
         }
@@ -2181,6 +2198,60 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.mem_loan_into.by_bb.entry(bb).or_default().push(emit.clone());
             self.mem_loan_into.by_owner.entry(owner).or_default().push(emit);
         }
+    }
+
+    /// A copied `Vec`/`Box` buffer pointer, or a cast/slice built from one.
+    fn note_buf_owner(
+        &self,
+        rv: &Rvalue<'tcx>,
+        dest: mir::Local,
+        buf_owner: &mut FxHashMap<mir::Local, mir::Local>,
+    ) {
+        let owner = match rv {
+            Rvalue::Use(Operand::Copy(p) | Operand::Move(p), _)
+            | Rvalue::Cast(_, Operand::Copy(p) | Operand::Move(p), _) => {
+                self.buf_owner_of(*p, buf_owner)
+            }
+            Rvalue::Aggregate(_, ops) => ops.iter().find_map(|op| match op {
+                Operand::Copy(p) | Operand::Move(p) => self.buf_owner_of(*p, buf_owner),
+                _ => None,
+            }),
+            _ => None,
+        };
+        if let Some(owner) = owner {
+            buf_owner.insert(dest, owner);
+        }
+    }
+
+    /// `place` is the buffer pointer of an owner, or a local already known to be one.
+    fn buf_owner_of(
+        &self,
+        place: mir::Place<'tcx>,
+        buf_owner: &FxHashMap<mir::Local, mir::Local>,
+    ) -> Option<mir::Local> {
+        if place.projection.is_empty() {
+            return buf_owner.get(&place.local).copied();
+        }
+        if place.projection.iter().all(|e| matches!(e, PlaceElem::Field(..)))
+            && self.is_loan_owner(self.mir.local_decls[place.local].ty)
+        {
+            return Some(place.local);
+        }
+        None
+    }
+
+    /// `&*slot` / `&slot.field` where `slot` is an owner's buffer.
+    fn ref_buf_owner(
+        &self,
+        borrowed: mir::Place<'tcx>,
+        buf_owner: &FxHashMap<mir::Local, mir::Local>,
+    ) -> Option<mir::Local> {
+        if borrowed.projection.len() == 1 && matches!(borrowed.projection[0], PlaceElem::Deref) {
+            if let Some(owner) = buf_owner.get(&borrowed.local) {
+                return Some(*owner);
+            }
+        }
+        self.buf_owner_of(borrowed, buf_owner)
     }
 
     /// `deref` / `deref_mut` of a `Vec` or `Box` yields the slice; the slice local
@@ -2212,7 +2283,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let name = self.cx.tcx().item_name(def_id);
         match name.as_str() {
             "push" | "push_mut" => Some(LoanIntoMode::Store),
-            "copy_from_slice" | "extend_from_slice" | "clone_from" => Some(LoanIntoMode::Propagate),
+            // `-O2` inlines `copy_from_slice` / `clone_from_slice` to the impl, and
+            // `Vec::clone_from` to `clone_into`. The slice args are still (dest, src).
+            "copy_from_slice" | "copy_from_slice_impl" | "clone_from_slice" | "spec_clone_from"
+            | "extend_from_slice" | "clone_from" | "clone_into" => Some(LoanIntoMode::Propagate),
             _ => None,
         }
     }
@@ -2313,10 +2387,18 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 self.mem_stats.loan_into_skipped += 1;
                 continue;
             };
-            let Some(val) = self.loan_into_value(bx, fact.value_local, &fact.value_fields, bb)
-            else {
-                self.mem_stats.loan_into_skipped += 1;
-                continue;
+            // A propagated fact reuses the SSA captured when the source loan was
+            // emitted. Reloading the local can see a later store into the same slot.
+            let val = if let Some(saved) = self.saved_loan_value(fact.id, bb) {
+                saved
+            } else {
+                let Some(loaded) =
+                    self.loan_into_value(bx, fact.value_local, &fact.value_fields, bb)
+                else {
+                    self.mem_stats.loan_into_skipped += 1;
+                    continue;
+                };
+                loaded
             };
             self.mem_loan_into_saved.push((fact.id, val, bb));
             self.mem_loan_into_ready.push((ptr, val, fact.id));
@@ -2379,6 +2461,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if !added.is_empty() {
             self.mem_loan_into.by_owner.entry(dest).or_default().extend(added);
         }
+    }
+
+    fn saved_loan_value(&self, id: u64, bb: BasicBlock) -> Option<Bx::Value> {
+        let dom = self.mir.basic_blocks.dominators();
+        self.mem_loan_into_saved
+            .iter()
+            .rev()
+            .find(|saved| saved.0 == id && dom.dominates(saved.2, bb))
+            .map(|saved| saved.1)
     }
 
     fn loan_into_owner_ptr(
