@@ -1932,6 +1932,7 @@ pub(crate) struct LoanIntoPlan {
     by_owner: FxHashMap<mir::Local, Vec<LoanIntoEmit>>,
 }
 
+#[derive(Clone)]
 struct Carried {
     id: u64,
     fields: Vec<u16>,
@@ -2020,7 +2021,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         let mut acc = Vec::new();
                         let mut bad = false;
                         for (i, op) in ops.iter().enumerate() {
-                            let Operand::Copy(p) | Operand::Move(p) = op else {
+                            let (Operand::Copy(p) | Operand::Move(p)) = op else {
                                 if self.operand_has_ref(op) {
                                     bad = true;
                                 }
@@ -2199,7 +2200,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     fn is_loan_owner(&self, ty: Ty<'tcx>) -> bool {
         let ty = self.monomorphize(ty);
         let inner = if ty.is_box() {
-            Some(ty.boxed_ty())
+            ty.boxed_ty()
         } else if let ty::Adt(def, args) = ty.kind()
             && self.cx.tcx().is_diagnostic_item(rustc_span::sym::Vec, def.did())
         {

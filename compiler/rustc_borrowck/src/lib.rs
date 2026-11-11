@@ -746,7 +746,7 @@ fn record_cheri_loan_overlap<'tcx>(
 }
 
 /// One borrowed place contains the other (same local, one projection is a prefix).
-fn cheri_places_overlap(a: Place<'_>, b: Place<'_>) -> bool {
+fn cheri_places_overlap<'a>(a: Place<'a>, b: Place<'a>) -> bool {
     if a.local != b.local {
         return false;
     }

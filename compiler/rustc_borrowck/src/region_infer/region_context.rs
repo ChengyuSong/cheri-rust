@@ -257,6 +257,36 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         self.scc_values.contains_point(scc, p)
     }
 
+    /// Whether `sup_region` outlives `sub_region` after constraints have been solved.
+    /// Same rule as `UnsolvedRegionInferenceContext::eval_outlives`.
+    pub(crate) fn eval_outlives(&self, sup_region: RegionVid, sub_region: RegionVid) -> bool {
+        let sub_region_scc = self.constraint_sccs.scc(sub_region);
+        let sup_region_scc = self.constraint_sccs.scc(sup_region);
+        if sub_region_scc == sup_region_scc {
+            return true;
+        }
+        let fr_static = self.universal_regions().fr_static;
+        if sub_region != fr_static
+            && !self.scc_annotations[sup_region_scc]
+                .can_name_all_placeholders(self.scc_annotations[sub_region_scc])
+        {
+            return self.eval_outlives(sup_region, fr_static);
+        }
+        let universal_outlives =
+            self.scc_values.universal_regions_outlived_by(sub_region_scc).all(|r1| {
+                self.scc_values
+                    .universal_regions_outlived_by(sup_region_scc)
+                    .any(|r2| self.universal_region_relations.outlives(r2, r1))
+            });
+        if !universal_outlives {
+            return false;
+        }
+        if self.universal_regions().is_universal_region(sup_region) {
+            return true;
+        }
+        self.scc_values.contains_points(sup_region_scc, sub_region_scc)
+    }
+
     /// Returns the lowest statement index in `start..=end` which is not contained by `r`.
     pub(crate) fn first_non_contained_inclusive(
         &self,
