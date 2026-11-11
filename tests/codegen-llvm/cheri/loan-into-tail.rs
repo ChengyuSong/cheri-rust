@@ -2,8 +2,10 @@
 // referent is dropped, so the element loan ends at the last use of the Vec.
 // `copy_from_slice` / `extend_from_slice` / `clone_from` must put every loan
 // the source carries onto the destination, with that loan's value and id.
-// At `-Copt-level=2`, SROA of a destination header that nothing else escapes
-// drops the propagated facts (`mem.dropped`); the id match is checked at `-O0`.
+// At `-Copt-level=2`, SROA of a destination header rewrites its facts to
+// `mem.loan_into.val` of the buffer-pointer SSA, with the same loan values
+// and ids. A `CHECK-NOT` of `mem.loan_into` must include the quote and paren
+// so it does not match that tag.
 //
 //@ revisions: o0 o2
 //@ [o0] compile-flags: -Copt-level=0 -Cdebuginfo=0
@@ -37,7 +39,7 @@ struct Pair<'a, 'b> {
 // o0: mem.loan_into{{.*}}%v{{.*}}%[[D]], i64
 // o0: mem.loan_into{{.*}}%v{{.*}}%[[B:[-a-zA-Z0-9_.]+]], i64
 // o0: mem.loan_into{{.*}}%v{{.*}}%[[B]], i64
-// o0-NOT: mem.loan_into
+// o0-NOT: "mem.loan_into"(
 // o0: ret void
 // o2-LABEL: @vec_tail(
 // o2: mem.loan_into{{.*}}%v{{.*}}%[[D:[-a-zA-Z0-9_.]+]], i64
@@ -45,7 +47,7 @@ struct Pair<'a, 'b> {
 // The next store is `black_box(*v[1])`, the last use of `v`. Its `!mem.last_use`
 // node (checked after the last `-O2` function) lists this loan id.
 // o2: store {{.*}}!mem.last_use ![[LU:[0-9]+]]
-// o2-NOT: mem.loan_into
+// o2-NOT: "mem.loan_into"(
 // o2: ret void
 #[no_mangle]
 pub fn vec_tail() {
@@ -65,12 +67,12 @@ pub fn vec_tail() {
 // o0: mem.loan_into{{.*}}%v,
 // o0: mem.loan_into{{.*}}%v,
 // o0: mem.loan_into{{.*}}%v,
-// o0-NOT: mem.loan_into
+// o0-NOT: "mem.loan_into"(
 // o0: ret void
 // o2-LABEL: @holder_tail(
 // o2: mem.loan_into{{.*}}%v{{.*}}%[[D:[-a-zA-Z0-9_.]+]], i64
 // o2: mem.loan_into{{.*}}%v{{.*}}%[[B:[-a-zA-Z0-9_.]+]], i64
-// o2-NOT: mem.loan_into
+// o2-NOT: "mem.loan_into"(
 // o2: ret void
 #[no_mangle]
 pub fn holder_tail() {
@@ -93,13 +95,13 @@ pub fn holder_tail() {
 // o0: mem.loan_into{{.*}}%v{{.*}}%[[BA]], i64
 // o0: mem.loan_into{{.*}}%v{{.*}}%[[BB:[-a-zA-Z0-9_.]+]], i64
 // o0: mem.loan_into{{.*}}%v{{.*}}%[[BB]], i64
-// o0-NOT: mem.loan_into
+// o0-NOT: "mem.loan_into"(
 // o0: ret void
 // o2-LABEL: @pair_tail(
 // o2: mem.loan_into{{.*}}%v{{.*}}%[[D:[-a-zA-Z0-9_.]+]], i64
 // o2: mem.loan_into{{.*}}%v{{.*}}%[[BA:[-a-zA-Z0-9_.]+]], i64
 // o2: mem.loan_into{{.*}}%v{{.*}}%[[BB:[-a-zA-Z0-9_.]+]], i64
-// o2-NOT: mem.loan_into
+// o2-NOT: "mem.loan_into"(
 // o2: ret void
 #[no_mangle]
 pub fn pair_tail() {
@@ -126,14 +128,18 @@ pub fn pair_tail() {
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S1]], i64 [[I1]]
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S2]], i64 [[I2]]
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S3]], i64 [[I3]]
-// o0-NOT: mem.loan_into
+// o0-NOT: "mem.loan_into"(
 // o0: ret void
-// At `-O2` the destination header is SROA'd and those facts become `mem.dropped`.
-// The matching destination ids are the `-O0` checks above. Source facts remain.
+// At `-O2` SROA promotes the destination header. Its facts are
+// `mem.loan_into.val` of the buffer-pointer SSA, with the same loan values
+// and ids as the source, including `&*b`.
 // o2-LABEL: @copy_tail(
-// o2: mem.loan_into{{.*}}%src{{.*}}%[[D:[-a-zA-Z0-9_.]+]], i64
-// o2: mem.loan_into{{.*}}%src{{.*}}%[[B:[-a-zA-Z0-9_.]+]], i64
-// o2-NOT: mem.loan_into
+// o2: "mem.loan_into"({{.*}}%src{{.*}}%[[D:[-a-zA-Z0-9_.]+]], i64 [[ID:[0-9]+]]
+// o2: "mem.loan_into"({{.*}}%src{{.*}}%[[B:[-a-zA-Z0-9_.]+]], i64 [[IB:[0-9]+]]
+// o2: "mem.loan_into.val"({{.*}}%[[D]], i64 [[ID]]
+// o2: "mem.loan_into.val"({{.*}}%[[B]], i64 [[IB]]
+// o2-NOT: "mem.loan_into"(
+// o2-NOT: "mem.loan_into.val"(
 // o2: ret void
 // o2: ![[LU]] = !{{{.*}}[[BID]]
 #[no_mangle]
@@ -163,7 +169,7 @@ pub fn copy_tail() {
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S1]], i64 [[I1]]
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S2]], i64 [[I2]]
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S3]], i64 [[I3]]
-// o0-NOT: mem.loan_into
+// o0-NOT: "mem.loan_into"(
 // o0: ret void
 #[no_mangle]
 pub fn extend_tail(_extra: &[Holder<'_>]) {
@@ -188,7 +194,7 @@ pub fn extend_tail(_extra: &[Holder<'_>]) {
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S1]], i64 [[I1]]
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S2]], i64 [[I2]]
 // o0: mem.loan_into{{.*}}%dst{{.*}}%[[S3]], i64 [[I3]]
-// o0-NOT: mem.loan_into
+// o0-NOT: "mem.loan_into"(
 // o0: ret void
 #[no_mangle]
 pub fn clone_tail() {
