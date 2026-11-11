@@ -1,6 +1,6 @@
 //! M5r R1 (RELAYER-DESIGN.md): target-neutral memory annotations emitted by codegen.
 //!
-//! LLM-generated research prototype (personal-use exemption in AGENTS.md); not for upstream.
+//! CHERI research prototype on this fork (see AGENTS.md). Not for upstream.
 //!
 //! rustc only *passes information* to LLVM here; it makes no CHERI decision (no
 //! `csetbounds`, no narrow skipping, no check elision). The late CHERI passes in LLVM
@@ -15,6 +15,13 @@
 //!   operands, the library `cheri_contract_narrow` intrinsic).
 //! - `"mem.free"(p)` operand bundle on deallocator calls (`#[rustc_deallocator]`).
 //! - `!mem.last_use !{loan}` on the last use of simple loans (see `find_last_uses`).
+//! - `call void @llvm.mem.fact() [ "mem.move"(ptr) ]` after a move of `Box` or `Vec`
+//!   (or `Option` of those) out of a local memory place (M7.1a). The operand is the
+//!   source slot. A scalar load records a read. A memory operand records the slot
+//!   and does not emit yet. Each later full-size copy into a different pointer, or
+//!   a by-value call that is handed the slot, moves the single fact to after that
+//!   read. A partial copy retires the slot with no fact. `-Zcheri-annotate` on a
+//!   CHERI target gates it, the same as the loan facts.
 //!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
@@ -27,7 +34,7 @@ use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{self, AssertKind, BasicBlock, Operand, PlaceElem, Rvalue, StatementKind};
 use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf};
-use rustc_middle::ty::{self, Ty};
+use rustc_middle::ty::{self, Ty, TypeVisitableExt};
 use rustc_target::callconv::FnAbi;
 
 use super::operand::{OperandRef, OperandValue};
@@ -489,6 +496,144 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.mem_stats.last_use_calls += 1;
             bx.set_next_call_mem_last_use(&loans);
         }
+    }
+
+    /// M7.1a: a `Box` / `Vec` (or `Option` of those) was just loaded or aliased by
+    /// `Operand::Move`. The slot is tracked. A scalar load is one full read. A
+    /// memory operand is not consumed until a later full-size copy into a different
+    /// pointer, or a by-value call that is handed the slot. Each such read moves
+    /// the single fact to immediately after itself, so an earlier copy or an
+    /// inlined return cannot leave `mem.move` before a later `memcpy`
+    /// (`from_elem`, `CString::spec_new_impl`). A partial copy drops the fact.
+    pub(crate) fn mem_note_owner_move(
+        &mut self,
+        bx: &mut Bx,
+        place: mir::PlaceRef<'tcx>,
+        val: &OperandRef<'tcx, Bx::Value>,
+    ) {
+        if !self.mem_annotate() || !self.mem_move_place_precise(place) {
+            return;
+        }
+        let ty = self.monomorphized_place_ty(place);
+        if ty.has_param()
+            || ty.has_infer()
+            || ty.has_placeholders()
+            || !self.mem_is_unique_owner(ty)
+        {
+            return;
+        }
+        match val.val {
+            OperandValue::Immediate(_) | OperandValue::Pair(_, _) => {
+                let cg = self.codegen_place(bx, place);
+                if cg.layout.is_unsized() || cg.val.llextra.is_some() {
+                    return;
+                }
+                let bytes = cg.layout.size.bytes();
+                bx.mem_move_track(cg.val.llval, bytes);
+                // The load copied the owner into a register. `const_null` is a
+                // destination that is not the slot, so this counts as a full read.
+                // A later full `memcpy` of the slot moves the fact to after that copy.
+                let elsewhere = bx.const_null(bx.type_ptr());
+                bx.mem_move_read(cg.val.llval, elsewhere, Some(bytes));
+            }
+            OperandValue::Ref(pv) if pv.llextra.is_none() => {
+                let bytes = bx.layout_of(ty).size.bytes();
+                bx.mem_move_track(pv.llval, bytes);
+            }
+            OperandValue::Ref(_) | OperandValue::ZeroSized => {}
+        }
+    }
+
+    /// `memcpy %scratch <- %slot` while passing `%slot` indirectly at `-O0`.
+    ///
+    /// That copy is `OperandValue::Ref::store_with_flags` → `typed_place_copy`
+    /// → `Builder::memcpy`. The memcpy hook only emits when `%slot` is still a
+    /// live track and the size operand is a constant wide enough for it. An
+    /// `intcast` of the length, or a copy taken because the operand is not
+    /// `Operand::Move`, leaves no fact: the hook either never saw the slot or
+    /// retired it. This is the copy `eat_vec` actually reads (`move_vec`,
+    /// `move_repeat`'s `%c`). Record the source and place the fact immediately
+    /// after the store, using the layout size rather than the cast length.
+    pub(crate) fn mem_move_after_arg_copy(
+        &mut self,
+        bx: &mut Bx,
+        ty: Ty<'tcx>,
+        src: Bx::Value,
+        dest: Bx::Value,
+    ) {
+        if !self.mem_annotate() {
+            return;
+        }
+        let bytes = bx.layout_of(ty).size.bytes();
+        if bytes == 0 {
+            return;
+        }
+        if !self.mem_is_unique_owner(ty) {
+            // Still relocate a track that was recorded for this pointer.
+            bx.mem_move_read(src, dest, Some(bytes));
+            return;
+        }
+        bx.mem_move_track(src, bytes);
+        bx.mem_move_read(src, dest, Some(bytes));
+    }
+
+    /// The place is a local stack slot, or a constant-offset field of one, or a
+    /// dereference of a local pointer. Dynamic indices and subslices are skipped:
+    /// the resulting address is not a slot this pass can name precisely.
+    fn mem_move_place_precise(&self, place: mir::PlaceRef<'tcx>) -> bool {
+        let projections_ok = place.projection.iter().all(|elem| {
+            matches!(
+                elem,
+                mir::ProjectionElem::Field(..)
+                    | mir::ProjectionElem::Downcast(..)
+                    | mir::ProjectionElem::Deref
+                    | mir::ProjectionElem::ConstantIndex { from_end: false, .. }
+            )
+        });
+        if !projections_ok {
+            return false;
+        }
+        match self.locals[place.local] {
+            LocalRef::Place(_) => true,
+            // An SSA local has no alloca. A leading deref is the pointee slot,
+            // which `codegen_place` can name. Any other projection of an SSA
+            // local is a register extract, not a memory slot.
+            LocalRef::Operand(_) if place.is_indirect_first_projection() => true,
+            LocalRef::Operand(_) | LocalRef::PendingOperand | LocalRef::UnsizedPlace(_) => false,
+        }
+    }
+
+    fn mem_is_box_or_vec(&self, ty: Ty<'tcx>) -> bool {
+        if ty.is_box() {
+            return true;
+        }
+        match ty.kind() {
+            ty::Adt(def, _) => self.cx.tcx().is_diagnostic_item(rustc_span::sym::Vec, def.did()),
+            _ => false,
+        }
+    }
+
+    /// `Box` and `Vec` are the unique owners whose bit-copy is a move. `Option`
+    /// of those is included because the niche is the owner capability itself
+    /// (`Option<Box<T>>` in an escaped slot). Copy types and raw pointers are not.
+    fn mem_is_unique_owner(&self, ty: Ty<'tcx>) -> bool {
+        let tcx = self.cx.tcx();
+        if ty.is_raw_ptr() || ty.is_ref() || ty.is_fn_ptr() {
+            return false;
+        }
+        if tcx.type_is_copy_modulo_regions(self.cx.typing_env(), ty) {
+            return false;
+        }
+        if self.mem_is_box_or_vec(ty) {
+            return true;
+        }
+        if let ty::Adt(def, args) = ty.kind()
+            && tcx.is_diagnostic_item(rustc_span::sym::Option, def.did())
+            && let Some(inner) = args.types().next()
+        {
+            return self.mem_is_box_or_vec(inner);
+        }
+        false
     }
 
     /// `!mem.guard` on the index GEP of the site access being emitted (`codegen_place`).

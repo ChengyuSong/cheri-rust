@@ -1005,6 +1005,107 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         self.call_intrinsic("llvm.mem.claim", &[self.val_ty(ptr)], &[ptr, bytes, flags])
     }
 
+    fn mem_move_track(&mut self, slot: &'ll Value, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        // A constant (promoted static, constantexpr) is not a stack slot. A
+        // fact on it would ask the backend to null immutable memory.
+        let peeled = mem_move_peel(slot);
+        if unsafe { llvm::LLVMIsAInstruction(peeled) }.is_none() {
+            return;
+        }
+        let mut moves = self.cx.mem_moves.borrow_mut();
+        if moves.iter().any(|m| !m.retired && mem_move_same(m.slot, slot)) {
+            return;
+        }
+        moves.push(crate::context::MemMove { slot, size: bytes, fact: None, retired: false });
+    }
+
+    fn mem_move_read(&mut self, src: &'ll Value, dest: &'ll Value, bytes: Option<u64>) {
+        // A copy onto the same storage does not end the value. A later copy to
+        // a different pointer still sees the bytes here, so it must own the fact.
+        if mem_move_same(src, dest) {
+            return;
+        }
+        let action = {
+            let mut moves = self.cx.mem_moves.borrow_mut();
+            let Some(m) = moves.iter_mut().find(|m| !m.retired && mem_move_same(m.slot, src))
+            else {
+                return;
+            };
+            // Unknown or partial: drop the fact so it cannot sit in front of
+            // this copy. A caller that knows the layout size records a fresh
+            // track after the copy and emits there.
+            if matches!(bytes, Some(n) if n >= m.size) {
+                let slot = m.slot;
+                let fact = m.fact.take();
+                MemMoveAction::Place { slot, fact }
+            } else {
+                let fact = m.fact.take();
+                m.retired = true;
+                MemMoveAction::Retire(fact)
+            }
+        };
+        match action {
+            MemMoveAction::Retire(fact) => erase_move_fact(fact),
+            MemMoveAction::Place { slot, fact } => {
+                erase_move_fact(fact);
+                self.mem_fact("mem.move", &[slot]);
+                let inst = unsafe {
+                    llvm::LLVMGetLastInstruction(llvm::LLVMGetInsertBlock(self.llbuilder))
+                };
+                if let Some(m) = self
+                    .cx
+                    .mem_moves
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|m| !m.retired && mem_move_same(m.slot, slot))
+                {
+                    m.fact = inst;
+                }
+            }
+        }
+    }
+
+    fn mem_move_begin_call(&mut self) {
+        self.cx.mem_call_frames.borrow_mut().push(Vec::new());
+    }
+
+    fn mem_move_arm_call(&mut self, slot: &'ll Value) {
+        let tracked = self
+            .cx
+            .mem_moves
+            .borrow()
+            .iter()
+            .any(|m| !m.retired && mem_move_same(m.slot, slot));
+        if !tracked {
+            return;
+        }
+        let mut frames = self.cx.mem_call_frames.borrow_mut();
+        if let Some(frame) = frames.last_mut() {
+            frame.push(slot);
+        }
+    }
+
+    fn mem_move_finish_call(&mut self) {
+        let Some(frame) = self.cx.mem_call_frames.borrow_mut().pop() else { return };
+        let distinct = self.cx.const_null(self.cx.type_ptr());
+        for slot in frame {
+            // The callee read the whole slot. A later memcpy of it relocates the fact.
+            self.mem_move_read(slot, distinct, Some(u64::MAX));
+        }
+    }
+
+    fn mem_move_abort_call(&mut self) {
+        self.cx.mem_call_frames.borrow_mut().pop();
+    }
+
+    fn mem_move_clear(&mut self) {
+        self.cx.mem_moves.borrow_mut().clear();
+        self.cx.mem_call_frames.borrow_mut().clear();
+    }
+
     fn mem_fact(&mut self, tag: &'static str, ops: &[&'ll Value]) {
         if mem_off("fact") {
             return;
@@ -1499,6 +1600,11 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         preserve_tags: rustc_codegen_ssa::common::PreserveCheriTags,
     ) {
         assert!(!flags.contains(MemFlags::NONTEMPORAL), "non-temporal memcpy not supported");
+        // `intcast` of an `isize` constant is not always a ConstantInt, and a
+        // wider-than-64 constant fails `LLVMRustConstIntGetZExtValue`. Read the
+        // count first so a layout-sized copy is not reported as an unknown size
+        // and dropped.
+        let known_bytes = mem_move_const_bytes(size);
         let size = self.intcast(size, self.type_isize(), false);
         let preserve_tags = PreserveCheriTags::from_generic(preserve_tags);
         let is_volatile = flags.contains(MemFlags::VOLATILE);
@@ -1523,6 +1629,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         if let Some(tt) = tt {
             crate::typetree::add_tt(self, memcpy, tt);
         }
+        self.mem_move_read(src, dst, known_bytes.or_else(|| mem_move_const_bytes(size)));
     }
 
     fn memmove(
@@ -2560,6 +2667,51 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
         index: &'ll Value,
     ) {
         self.call_intrinsic("llvm.instrprof.increment", &[], &[fn_name, hash, num_counters, index]);
+    }
+}
+
+enum MemMoveAction<'ll> {
+    Retire(Option<&'ll Value>),
+    Place { slot: &'ll Value, fact: Option<&'ll Value> },
+}
+
+/// Bitcasts and addrspacecasts of one alloca compare equal. A copy through a
+/// cast is still the same slot; treating the cast as a different pointer emits
+/// `mem.move` before the real `memcpy`.
+fn mem_move_same(a: &llvm::Value, b: &llvm::Value) -> bool {
+    std::ptr::eq(mem_move_peel(a), mem_move_peel(b))
+}
+
+fn mem_move_peel(mut v: &llvm::Value) -> &llvm::Value {
+    for _ in 0..8 {
+        if unsafe { llvm::LLVMIsAInstruction(v) }.is_none() {
+            break;
+        }
+        let op = unsafe { llvm::LLVMGetInstructionOpcode(v) };
+        if op != llvm::Opcode::BitCast && op != llvm::Opcode::AddrSpaceCast {
+            break;
+        }
+        match unsafe { llvm::LLVMGetOperand(v, 0) } {
+            Some(next) => v = next,
+            None => break,
+        }
+    }
+    v
+}
+
+fn mem_move_const_bytes(size: &llvm::Value) -> Option<u64> {
+    let constant = unsafe { llvm::LLVMIsAConstantInt(size) }?;
+    let mut n = 0u64;
+    if unsafe { llvm::LLVMRustConstIntGetZExtValue(constant, &mut n) } {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+fn erase_move_fact(fact: Option<&llvm::Value>) {
+    if let Some(fact) = fact {
+        unsafe { llvm::LLVMInstructionEraseFromParent(fact) };
     }
 }
 

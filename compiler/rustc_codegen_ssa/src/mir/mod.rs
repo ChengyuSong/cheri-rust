@@ -274,6 +274,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
     let start_llbb = Bx::append_block(cx, llfn, "start");
     let mut start_bx = Bx::build(cx, start_llbb);
+    start_bx.mem_move_clear();
 
     if mir::traversal::mono_reachable(&mir, tcx, instance).any(|(bb, block)| {
         (block.is_cleanup && !nop_landing_pads.contains(bb))

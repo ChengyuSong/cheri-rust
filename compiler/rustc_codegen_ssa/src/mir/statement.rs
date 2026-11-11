@@ -137,7 +137,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             | mir::StatementKind::ConstEvalCounter
             | mir::StatementKind::PlaceMention(..)
             | mir::StatementKind::BackwardIncompatibleDropHint { .. }
-            | mir::StatementKind::Nop => {}
+            |             mir::StatementKind::Nop => {}
         }
     }
 }
