@@ -15,6 +15,11 @@
 //!   operands, the library `cheri_contract_narrow` intrinsic).
 //! - `"mem.free"(p)` operand bundle on deallocator calls (`#[rustc_deallocator]`).
 //! - `!mem.last_use !{loan}` on the last use of simple loans (see `find_last_uses`).
+//! - `call void @llvm.mem.fact() [ "mem.loan_into"(ptr owner_ptr_field, ptr loan_val, i64 id) ]`
+//!   after a call that may have stored loan `id` into a local `Vec`/`Box` (M7.1b). The
+//!   late pass re-reads the header and nulls only slots equal to `loan_val`. Same-value
+//!   collisions (another longer loan of the same place, or an unknown reference, in that
+//!   owner) emit nothing.
 //! - `call void @llvm.mem.fact() [ "mem.move"(ptr) ]` after a move of `Box` or `Vec`
 //!   (or `Option` of those) out of a local memory place (M7.1a). The operand is the
 //!   source slot. A scalar load records a read. A memory operand records the slot
@@ -1365,6 +1370,10 @@ pub(crate) struct MemStats {
     /// R9 (D65): linked starts paired with their local's assignment / with a lost link.
     pub loan_link_paired: u32,
     pub loan_link_lost: u32,
+    /// M7.1b: `mem.loan_into` facts emitted, and facts skipped by the same-value guard
+    /// or because the owner/value could not be named.
+    pub loan_into: u32,
+    pub loan_into_skipped: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1866,7 +1875,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let s = &self.mem_stats;
         let tcx = self.cx.tcx();
         let line = format!(
-            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\tloan_link_paired={}\tloan_link_lost={}\tloan_slot_aggregate={}\n",
+            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\tloan_link_paired={}\tloan_link_lost={}\tloan_slot_aggregate={}\tloan_into={}\tloan_into_skipped={}\n",
             tcx.symbol_name(self.instance).name,
             s.sites_matched,
             s.sites_unmatched,
@@ -1895,11 +1904,489 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             s.loan_link_paired,
             s.loan_link_lost,
             s.loan_slot_aggregate,
+            s.loan_into,
+            s.loan_into_skipped,
         );
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = f.write_all(line.as_bytes());
         }
+    }
+}
+
+/// One `mem.loan_into` to emit after a call, or again after the owner header moves.
+#[derive(Clone)]
+pub(crate) struct LoanIntoEmit {
+    /// Raw borrowck loan key (`mem_loan_key` is applied at emission).
+    id: u64,
+    owner: mir::Local,
+    ptr_offset: u64,
+    /// Local that holds the reference value, and the field path inside it.
+    value_local: mir::Local,
+    value_fields: Vec<u16>,
+}
+
+#[derive(Default)]
+pub(crate) struct LoanIntoPlan {
+    by_bb: FxHashMap<BasicBlock, Vec<LoanIntoEmit>>,
+    by_owner: FxHashMap<mir::Local, Vec<LoanIntoEmit>>,
+}
+
+struct Carried {
+    id: u64,
+    fields: Vec<u16>,
+}
+
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    /// [LLM-generated] M7.1b: which calls store a loan into a local `Vec`/`Box`.
+    ///
+    /// The heap write itself is inside `push` / `grow_one`, which stay calls in this
+    /// function's MIR. The fact names the owner's buffer-pointer field in this frame.
+    /// A second loan of the same place that outlives this one, or a reference with no
+    /// loan id, suppresses the fact (the late pass nulls every slot equal to the value).
+    pub(crate) fn prepare_loan_into(&mut self) {
+        if !self.mem_annotate() {
+            return;
+        }
+        let Some(def) = self.mir.source.def_id().as_local() else { return };
+        let overlap = self.cx.tcx().cheri_loan_overlap.lock().remove(&def).unwrap_or_default();
+        if overlap.iter().any(|&(a, b)| a == u64::MAX && b == u64::MAX) {
+            self.mem_stats.loan_into_skipped += 1;
+            return;
+        }
+        let outlives: FxHashSet<(u64, u64)> = overlap.into_iter().collect();
+
+        let mir = self.mir;
+        let mut carries: FxHashMap<mir::Local, Vec<Carried>> = Default::default();
+        let mut unknown: FxHashSet<mir::Local> = Default::default();
+        let mut ref_of: FxHashMap<mir::Local, mir::Place<'tcx>> = Default::default();
+        // bb, owner, ptr-field offset, local that holds the reference, loan.
+        let mut direct: Vec<(BasicBlock, mir::Local, u64, mir::Local, Carried)> = Vec::new();
+        let mut tainted: FxHashSet<mir::Local> = Default::default();
+        let mut propagate: Vec<(BasicBlock, mir::Local, mir::Local, u64)> = Vec::new();
+        let mut start_of: FxHashMap<mir::Local, Vec<u64>> = Default::default();
+        for data in mir.basic_blocks.iter() {
+            for stmt in &data.statements {
+                if let StatementKind::Intrinsic(mir::NonDivergingIntrinsic::LoanStart(id, link)) =
+                    stmt.kind
+                    && link != mir::Local::MAX
+                {
+                    start_of.entry(link).or_default().push(id);
+                }
+            }
+        }
+
+        for (bb, data) in mir.basic_blocks.iter_enumerated() {
+            for stmt in &data.statements {
+                let StatementKind::Assign(assign) = &stmt.kind else { continue };
+                let (place, rv) = &**assign;
+                if !place.projection.is_empty() {
+                    continue;
+                }
+                match rv {
+                    Rvalue::Ref(_, _, borrowed) => {
+                        ref_of.insert(place.local, *borrowed);
+                        if let Some(ids) = start_of.get_mut(&place.local)
+                            && let Some(id) = ids.pop()
+                        {
+                            carries.insert(place.local, vec![Carried { id, fields: Vec::new() }]);
+                        }
+                    }
+                    Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _)
+                        if src.projection.is_empty() =>
+                    {
+                        if let Some(p) = ref_of.get(&src.local).copied() {
+                            ref_of.insert(place.local, p);
+                        }
+                        if let Some(c) = carries.get(&src.local).cloned() {
+                            carries.insert(place.local, c);
+                        } else if unknown.contains(&src.local) {
+                            unknown.insert(place.local);
+                        }
+                    }
+                    Rvalue::Cast(_, Operand::Copy(src) | Operand::Move(src), _)
+                        if src.projection.is_empty() =>
+                    {
+                        if let Some(p) = ref_of.get(&src.local).copied() {
+                            ref_of.insert(place.local, p);
+                        }
+                        if let Some(c) = carries.get(&src.local).cloned() {
+                            carries.insert(place.local, c);
+                        } else if unknown.contains(&src.local) {
+                            unknown.insert(place.local);
+                        }
+                    }
+                    Rvalue::Aggregate(_, ops) => {
+                        let mut acc = Vec::new();
+                        let mut bad = false;
+                        for (i, op) in ops.iter().enumerate() {
+                            let Operand::Copy(p) | Operand::Move(p) = op else {
+                                if self.operand_has_ref(op) {
+                                    bad = true;
+                                }
+                                continue;
+                            };
+                            if !p.projection.is_empty() {
+                                if self.place_has_ref(*p) {
+                                    bad = true;
+                                }
+                                continue;
+                            }
+                            if let Some(cs) = carries.get(&p.local) {
+                                for c in cs {
+                                    let mut fields = vec![i as u16];
+                                    fields.extend_from_slice(&c.fields);
+                                    acc.push(Carried { id: c.id, fields });
+                                }
+                            } else if unknown.contains(&p.local) || self.local_has_ref(p.local) {
+                                bad = true;
+                            }
+                        }
+                        carries.insert(place.local, acc);
+                        if bad {
+                            unknown.insert(place.local);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mir::TerminatorKind::Call { func, args, .. } = &data.terminator().kind else {
+                continue;
+            };
+            let Some(mode) = self.loan_into_call_mode(func) else { continue };
+            let Some(recv) = args.first().and_then(|a| operand_local(&a.node)) else { continue };
+            let Some(owner) = self.loan_into_owner(recv, &ref_of) else { continue };
+            let offset = self.loan_into_ptr_offset(mir.local_decls[owner].ty);
+            let Some(offset) = offset else { continue };
+            match mode {
+                LoanIntoMode::Store => {
+                    for arg in args.iter().skip(1) {
+                        let Some(local) = operand_local(&arg.node) else {
+                            if self.operand_has_ref(&arg.node) {
+                                tainted.insert(owner);
+                            }
+                            continue;
+                        };
+                        if unknown.contains(&local) {
+                            tainted.insert(owner);
+                        }
+                        match carries.get(&local) {
+                            Some(cs) if !cs.is_empty() => {
+                                for c in cs {
+                                    direct.push((
+                                        bb,
+                                        owner,
+                                        offset,
+                                        local,
+                                        Carried { id: c.id, fields: c.fields.clone() },
+                                    ));
+                                }
+                            }
+                            _ if self.local_has_ref(local) => {
+                                tainted.insert(owner);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                LoanIntoMode::Propagate => {
+                    let Some(src_op) = args.get(1).and_then(|a| operand_local(&a.node)) else {
+                        continue;
+                    };
+                    let Some(src_owner) = self.loan_into_owner(src_op, &ref_of) else {
+                        continue;
+                    };
+                    propagate.push((bb, owner, src_owner, offset));
+                }
+            }
+        }
+
+        self.finish_loan_into(direct, propagate, tainted, outlives);
+    }
+}
+
+enum LoanIntoMode {
+    Store,
+    Propagate,
+}
+
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    fn finish_loan_into(
+        &mut self,
+        direct: Vec<(BasicBlock, mir::Local, u64, mir::Local, Carried)>,
+        propagate: Vec<(BasicBlock, mir::Local, mir::Local, u64)>,
+        tainted: FxHashSet<mir::Local>,
+        outlives: FxHashSet<(u64, u64)>,
+    ) {
+        // bb, owner, offset, value local, carried loan.
+        let mut flows = direct;
+        for (bb, dest, src, offset) in propagate {
+            let copied: Vec<(mir::Local, Carried)> = flows
+                .iter()
+                .filter(|f| f.1 == src)
+                .map(|f| (f.3, Carried { id: f.4.id, fields: f.4.fields.clone() }))
+                .collect();
+            for (value_local, c) in copied {
+                flows.push((bb, dest, offset, value_local, c));
+            }
+        }
+        let owners_ids: FxHashSet<(mir::Local, u64)> =
+            flows.iter().map(|f| (f.1, f.4.id)).collect();
+        for (bb, owner, offset, value_local, carried) in flows {
+            let longer_also = outlives.iter().any(|&(shorter, longer)| {
+                shorter == carried.id && owners_ids.contains(&(owner, longer))
+            });
+            if tainted.contains(&owner) || longer_also {
+                self.mem_stats.loan_into_skipped += 1;
+                continue;
+            }
+            let emit = LoanIntoEmit {
+                id: carried.id,
+                owner,
+                ptr_offset: offset,
+                value_local,
+                value_fields: carried.fields,
+            };
+            self.mem_loan_into.by_bb.entry(bb).or_default().push(emit.clone());
+            self.mem_loan_into.by_owner.entry(owner).or_default().push(emit);
+        }
+    }
+
+    fn loan_into_call_mode(&self, func: &mir::Operand<'tcx>) -> Option<LoanIntoMode> {
+        let (def_id, _) = func.const_fn_def()?;
+        let name = self.cx.tcx().item_name(def_id);
+        match name.as_str() {
+            "push" | "push_mut" => Some(LoanIntoMode::Store),
+            "copy_from_slice" | "extend_from_slice" | "clone_from" => Some(LoanIntoMode::Propagate),
+            _ => None,
+        }
+    }
+
+    fn loan_into_owner(
+        &self,
+        recv: mir::Local,
+        ref_of: &FxHashMap<mir::Local, mir::Place<'tcx>>,
+    ) -> Option<mir::Local> {
+        let mut local = recv;
+        for _ in 0..6 {
+            let place = *ref_of.get(&local)?;
+            let chased = place.projection.len() == 1
+                && matches!(place.projection[0], PlaceElem::Deref);
+            if chased {
+                local = place.local;
+                continue;
+            }
+            if place.projection.iter().any(|e| {
+                matches!(
+                    e,
+                    PlaceElem::Deref
+                        | PlaceElem::Index(_)
+                        | PlaceElem::Subslice { .. }
+                        | PlaceElem::ConstantIndex { .. }
+                        | PlaceElem::Downcast(..)
+                )
+            }) {
+                return None;
+            }
+            if !self.is_loan_owner(self.mir.local_decls[place.local].ty) {
+                return None;
+            }
+            return Some(place.local);
+        }
+        None
+    }
+
+    fn is_loan_owner(&self, ty: Ty<'tcx>) -> bool {
+        let ty = self.monomorphize(ty);
+        let inner = if ty.is_box() {
+            Some(ty.boxed_ty())
+        } else if let ty::Adt(def, args) = ty.kind()
+            && self.cx.tcx().is_diagnostic_item(rustc_span::sym::Vec, def.did())
+        {
+            args.types().next()
+        } else {
+            None
+        };
+        inner.is_some_and(|t| ty_has_ref(self.monomorphize(t)))
+    }
+
+    fn loan_into_ptr_offset(&self, ty: Ty<'tcx>) -> Option<u64> {
+        let mut layout = self.cx.layout_of(self.monomorphize(ty));
+        let mut base = 0u64;
+        for _ in 0..8 {
+            if let rustc_abi::BackendRepr::Scalar(scalar) = layout.backend_repr
+                && matches!(scalar.primitive(), rustc_abi::Primitive::Pointer(_))
+            {
+                return Some(base);
+            }
+            let mut next = None;
+            for i in 0..layout.fields.count() {
+                let field = layout.field(self.cx, i);
+                if field.is_zst() {
+                    continue;
+                }
+                let off = layout.fields.offset(i).bytes();
+                next = Some((field, base + off));
+                break;
+            }
+            let (field, off) = next?;
+            layout = field;
+            base = off;
+        }
+        None
+    }
+
+    fn local_has_ref(&self, local: mir::Local) -> bool {
+        ty_has_ref(self.monomorphize(self.mir.local_decls[local].ty))
+    }
+
+    fn operand_has_ref(&self, op: &Operand<'tcx>) -> bool {
+        ty_has_ref(self.monomorphize(op.ty(&self.mir.local_decls, self.cx.tcx())))
+    }
+
+    fn place_has_ref(&self, place: mir::Place<'tcx>) -> bool {
+        let ty = place.ty(&self.mir.local_decls, self.cx.tcx()).ty;
+        ty_has_ref(self.monomorphize(ty))
+    }
+
+    /// Load the reference values for this call's facts before arguments are consumed.
+    pub(crate) fn mem_loan_into_preload(&mut self, bx: &mut Bx, bb: BasicBlock) {
+        self.mem_loan_into_ready.clear();
+        let Some(facts) = self.mem_loan_into.by_bb.get(&bb).cloned() else { return };
+        for fact in facts {
+            let Some(ptr) = self.loan_into_owner_ptr(bx, fact.owner, fact.ptr_offset) else {
+                self.mem_stats.loan_into_skipped += 1;
+                continue;
+            };
+            let Some(val) = self.loan_into_value(bx, fact.value_local, &fact.value_fields, bb)
+            else {
+                self.mem_stats.loan_into_skipped += 1;
+                continue;
+            };
+            self.mem_loan_into_saved.push((fact.id, val, bb));
+            self.mem_loan_into_ready.push((ptr, val, fact.id));
+        }
+    }
+
+    pub(crate) fn mem_loan_into_flush(&mut self, bx: &mut Bx) {
+        let ready = std::mem::take(&mut self.mem_loan_into_ready);
+        for (ptr, val, raw_id) in ready {
+            let id = self.mem_loan_key(raw_id);
+            bx.mem_fact("mem.loan_into", &[ptr, val, bx.const_u64(id)]);
+            self.mem_stats.loan_into += 1;
+        }
+    }
+
+    /// The owner header was copied to another local. Point the same loans at the
+    /// destination's buffer-pointer field. No saved value means no fact.
+    pub(crate) fn mem_loan_into_after_assign(
+        &mut self,
+        bx: &mut Bx,
+        place: &mir::Place<'tcx>,
+        rvalue: &Rvalue<'tcx>,
+    ) {
+        let Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _) = rvalue else { return };
+        if !src.projection.is_empty() || !place.projection.is_empty() {
+            return;
+        }
+        let Some(dest) = place.as_local() else { return };
+        if dest == src.local {
+            return;
+        }
+        let Some(facts) = self.mem_loan_into.by_owner.get(&src.local).cloned() else { return };
+        if !matches!(self.locals[dest], LocalRef::Place(_)) {
+            return;
+        }
+        let bb = self.mem_codegen_bb;
+        let dom = self.mir.basic_blocks.dominators();
+        let mut added = Vec::new();
+        for fact in facts {
+            let Some((_, val, def_bb)) =
+                self.mem_loan_into_saved.iter().rev().find(|s| s.0 == fact.id)
+            else {
+                self.mem_stats.loan_into_skipped += 1;
+                continue;
+            };
+            if !dom.dominates(*def_bb, bb) {
+                self.mem_stats.loan_into_skipped += 1;
+                continue;
+            }
+            let Some(ptr) = self.loan_into_owner_ptr(bx, dest, fact.ptr_offset) else {
+                self.mem_stats.loan_into_skipped += 1;
+                continue;
+            };
+            bx.mem_fact("mem.loan_into", &[ptr, *val, bx.const_u64(self.mem_loan_key(fact.id))]);
+            self.mem_stats.loan_into += 1;
+            let mut moved = fact.clone();
+            moved.owner = dest;
+            added.push(moved);
+        }
+        if !added.is_empty() {
+            self.mem_loan_into.by_owner.entry(dest).or_default().extend(added);
+        }
+    }
+
+    fn loan_into_owner_ptr(
+        &self,
+        bx: &mut Bx,
+        owner: mir::Local,
+        offset: u64,
+    ) -> Option<Bx::Value> {
+        let LocalRef::Place(place) = self.locals[owner] else { return None };
+        let ptr = if offset == 0 {
+            place.val.llval
+        } else {
+            bx.inbounds_ptradd(place.val.llval, bx.const_usize(offset))
+        };
+        Some(ptr)
+    }
+
+    fn loan_into_value(
+        &mut self,
+        bx: &mut Bx,
+        local: mir::Local,
+        fields: &[u16],
+        bb: BasicBlock,
+    ) -> Option<Bx::Value> {
+        let _ = bb;
+        match self.locals[local] {
+            LocalRef::Operand(op) => operand_field(bx, op.val, fields),
+            LocalRef::Place(place) => {
+                let mut pref = place;
+                for &f in fields {
+                    pref = pref.project_field(bx, f as usize);
+                }
+                let ty = bx.backend_type(pref.layout);
+                Some(bx.load(ty, pref.val.llval, pref.val.align))
+            }
+            LocalRef::PendingOperand | LocalRef::UnsizedPlace(_) => None,
+        }
+    }
+}
+
+fn operand_local(op: &Operand<'_>) -> Option<mir::Local> {
+    match op {
+        Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => Some(p.local),
+        _ => None,
+    }
+}
+
+fn ty_has_ref(ty: Ty<'_>) -> bool {
+    ty.walk().any(|g| g.as_type().is_some_and(|t| t.is_ref()))
+}
+
+fn operand_field<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+    bx: &mut Bx,
+    val: OperandValue<Bx::Value>,
+    fields: &[u16],
+) -> Option<Bx::Value> {
+    match (val, fields) {
+        (OperandValue::Immediate(v), []) => Some(v),
+        (OperandValue::Immediate(v), [0]) => Some(v),
+        (OperandValue::Pair(a, _), [0] | []) => Some(a),
+        (OperandValue::Pair(_, b), [1]) => Some(b),
+        (OperandValue::Ref(place), []) => Some(bx.load(bx.type_ptr(), place.llval, place.align)),
+        _ => None,
     }
 }
 
