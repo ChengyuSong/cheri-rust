@@ -1955,7 +1955,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.mem_stats.loan_into_skipped += 1;
             return;
         }
-        let outlives: FxHashSet<(u64, u64)> = overlap.into_iter().collect();
+        let mut longer_of: FxHashMap<u64, Vec<u64>> = FxHashMap::default();
+        for (shorter, longer) in overlap {
+            longer_of.entry(shorter).or_default().push(longer);
+        }
 
         let mir = self.mir;
         let mut carries: FxHashMap<mir::Local, Vec<Carried>> = Default::default();
@@ -2102,7 +2105,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
         }
 
-        self.finish_loan_into(direct, propagate, tainted, outlives);
+        self.finish_loan_into(direct, propagate, tainted, longer_of);
     }
 }
 
@@ -2117,7 +2120,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         direct: Vec<(BasicBlock, mir::Local, u64, mir::Local, Carried)>,
         propagate: Vec<(BasicBlock, mir::Local, mir::Local, u64)>,
         tainted: FxHashSet<mir::Local>,
-        outlives: FxHashSet<(u64, u64)>,
+        longer_of: FxHashMap<u64, Vec<u64>>,
     ) {
         // bb, owner, offset, value local, carried loan.
         let mut flows = direct;
@@ -2134,8 +2137,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let owners_ids: FxHashSet<(mir::Local, u64)> =
             flows.iter().map(|f| (f.1, f.4.id)).collect();
         for (bb, owner, offset, value_local, carried) in flows {
-            let longer_also = outlives.iter().any(|&(shorter, longer)| {
-                shorter == carried.id && owners_ids.contains(&(owner, longer))
+            let longer_also = longer_of.get(&carried.id).is_some_and(|longers| {
+                longers.iter().any(|longer| owners_ids.contains(&(owner, *longer)))
             });
             if tainted.contains(&owner) || longer_also {
                 self.mem_stats.loan_into_skipped += 1;
