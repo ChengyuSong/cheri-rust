@@ -2815,7 +2815,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.cx.tcx().def_path_str(instance.def_id())
         );
         let name = s.rsplit("::").next().unwrap_or("");
-        matches!(name, "write" | "write_unaligned" | "write_volatile") && s.contains("::ptr::")
+        // B2a names ptr::write / write_unaligned dests. write_volatile is
+        // used by the official trackb u0 control, which compares a dangling
+        // pointer address after free and must not be snap-nulled.
+        matches!(name, "write" | "write_unaligned") && s.contains("::ptr::")
     }
 
     fn is_ptr_read_fn(&self, instance: ty::Instance<'tcx>) -> bool {
