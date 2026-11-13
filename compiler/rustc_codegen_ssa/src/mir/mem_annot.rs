@@ -2811,13 +2811,17 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     }
 
     fn is_ptr_write_fn(&self, instance: ty::Instance<'tcx>) -> bool {
-        let s = self.cx.tcx().def_path_str(instance.def_id());
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
         let name = s.rsplit("::").next().unwrap_or("");
         matches!(name, "write" | "write_unaligned" | "write_volatile") && s.contains("::ptr::")
     }
 
     fn is_ptr_read_fn(&self, instance: ty::Instance<'tcx>) -> bool {
-        let s = self.cx.tcx().def_path_str(instance.def_id());
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
         let name = s.rsplit("::").next().unwrap_or("");
         matches!(name, "read" | "read_unaligned" | "read_volatile") && s.contains("::ptr::")
     }
