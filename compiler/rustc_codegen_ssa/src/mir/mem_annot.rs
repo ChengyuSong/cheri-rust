@@ -2816,6 +2816,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         matches!(name, "write" | "write_unaligned" | "write_volatile") && s.contains("::ptr::")
     }
 
+    fn is_ptr_read_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = self.cx.tcx().def_path_str(instance.def_id());
+        let name = s.rsplit("::").next().unwrap_or("");
+        matches!(name, "read" | "read_unaligned" | "read_volatile") && s.contains("::ptr::")
+    }
+
     /// After a call: fact a cap return stored into a nameable local (ptr::read),
     /// or a ptr::write into a nameable dest pointer.
     pub(crate) fn mem_store_into_on_call(
@@ -2857,14 +2863,18 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         } else {
             self.mem_store_into_arg0 = None;
         }
-        if let (Some(place), Some(cap)) = (self.mem_store_into_ret.take(), llret) {
-            let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
-            if is_store_into_cap_ty(ty) && self.store_into_dest_ok(place) {
-                if let Some(dest) = self.store_into_dest_ptr(bx, place) {
-                    bx.mem_fact("mem.store_into", &[dest, cap]);
-                    self.mem_stats.store_into += 1;
-                } else {
-                    self.mem_stats.store_into_skipped += 1;
+        if let (Some(place), Some(cap), Some(inst)) =
+            (self.mem_store_into_ret.take(), llret, instance)
+        {
+            if self.is_ptr_read_fn(inst) {
+                let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
+                if is_store_into_cap_ty(ty) && self.store_into_dest_ok(place) {
+                    if let Some(dest) = self.store_into_dest_ptr(bx, place) {
+                        bx.mem_fact("mem.store_into", &[dest, cap]);
+                        self.mem_stats.store_into += 1;
+                    } else {
+                        self.mem_stats.store_into_skipped += 1;
+                    }
                 }
             }
         } else {
