@@ -2584,7 +2584,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
             let field_pr = dest_pr.project_field(bx, i.as_usize());
             let cap_op = self.codegen_operand(bx, op);
-            let Some(cap) = store_into_operand_cap(cap_op) else { continue };
+            let Some(cap) = self.store_into_operand_cap(cap_op) else { continue };
             bx.mem_fact("mem.store_into", &[field_pr.val.llval, cap]);
             self.mem_stats.store_into += 1;
             emitted = true;
@@ -2621,7 +2621,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     let tcx = self.cx.tcx();
                     ty = match ty.kind() {
                         ty::Adt(def, args) => {
-                            def.all_fields().nth(f.index()).map(|fd| fd.ty(tcx, args)).unwrap_or(ty)
+                            def.all_fields().nth(f.index()).map(|fd| fd.ty(tcx, args).skip_norm_wip()).unwrap_or(ty)
                         }
                         ty::Tuple(ts) => ts.get(f.index()).copied().unwrap_or(ty),
                         _ => ty,
@@ -2640,7 +2640,6 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 mir::ProjectionElem::Downcast(_, _)
                 | mir::ProjectionElem::UnwrapUnsafeBinder(_) => {}
                 mir::ProjectionElem::OpaqueCast(_)
-                | mir::ProjectionElem::Subtype(_)
                 | mir::ProjectionElem::PhantomDeref => return false,
             }
         }
@@ -2719,7 +2718,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::Operand::Copy(p) | mir::Operand::Move(p) => {
                 self.store_into_place_origin_ok(*p, seen)
             }
-            mir::Operand::Constant(_) => false,
+            mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => false,
         }
     }
 
@@ -2767,13 +2766,25 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     fn store_into_cap_val(&mut self, bx: &mut Bx, rvalue: &Rvalue<'tcx>) -> Option<Bx::Value> {
         match rvalue {
             Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => {
-                store_into_operand_cap(self.codegen_operand(bx, op))
+                self.store_into_operand_cap(self.codegen_operand(bx, op))
             }
             Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
                 let pr = self.codegen_place(bx, p.as_ref());
                 Some(pr.val.llval)
             }
             _ => None,
+        }
+    }
+
+    fn store_into_operand_cap(
+        &self,
+        op: crate::mir::operand::OperandRef<'tcx, Bx::Value>,
+    ) -> Option<Bx::Value> {
+        match op.val {
+            crate::mir::operand::OperandValue::Immediate(v) => Some(v),
+            crate::mir::operand::OperandValue::Pair(a, _) => Some(a),
+            crate::mir::operand::OperandValue::ZeroSized => None,
+            crate::mir::operand::OperandValue::Ref(place) => Some(place.llval),
         }
     }
 }
@@ -2786,16 +2797,6 @@ fn is_store_into_cap_ty(ty: Ty<'_>) -> bool {
     }
 }
 
-fn store_into_operand_cap<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
-    op: crate::mir::operand::OperandRef<'tcx, Bx::Value>,
-) -> Option<Bx::Value> {
-    match op.val {
-        crate::mir::operand::OperandValue::Immediate(v) => Some(v),
-        crate::mir::operand::OperandValue::Pair(a, _) => Some(a),
-        crate::mir::operand::OperandValue::ZeroSized => None,
-        crate::mir::operand::OperandValue::Ref(place) => Some(place.llval),
-    }
-}
 
 
 fn operand_local(op: &Operand<'_>) -> Option<mir::Local> {
