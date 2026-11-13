@@ -2766,7 +2766,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     fn store_into_cap_val(&mut self, bx: &mut Bx, rvalue: &Rvalue<'tcx>) -> Option<Bx::Value> {
         match rvalue {
             Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => {
-                self.store_into_operand_cap(self.codegen_operand(bx, op))
+                let cap_op = self.codegen_operand(bx, op);
+                self.store_into_operand_cap(cap_op)
             }
             Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
                 let pr = self.codegen_place(bx, p.as_ref());
