@@ -308,6 +308,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 }
                 let invokeret = fx.mem_call_return_claim(bx, invokeret, fn_abi, instance);
                 fx.store_return(bx, ret_dest, &fn_abi.ret, invokeret);
+                fx.mem_store_into_on_call(bx, instance, llargs, Some(invokeret));
 
                 // If the return value was retagged as it was stored,
                 // then we might be in a different basic block now.
@@ -344,6 +345,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 }
                 let llret = fx.mem_call_return_claim(bx, llret, fn_abi, instance);
                 fx.store_return(bx, ret_dest, &fn_abi.ret, llret);
+                fx.mem_store_into_on_call(bx, instance, llargs, Some(llret));
                 self.funclet_br(fx, bx, target, mergeable_succ, &[])
             } else {
                 bx.unreachable();
@@ -1008,6 +1010,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         mergeable_succ: bool,
     ) -> MergingSucc {
         let source_info = mir::SourceInfo { span: fn_span, ..terminator.source_info };
+        self.mem_store_into_ret = Some(destination);
+        self.mem_store_into_arg0 = args.first().map(|a| a.node.clone());
 
         // Create the callee. This is a fn ptr or zero-sized and hence a kind of scalar.
         let callee = self.codegen_operand(bx, func);

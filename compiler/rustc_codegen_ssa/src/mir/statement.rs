@@ -68,6 +68,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     }
                 }
                 self.mem_loan_into_after_assign(bx, place, rvalue);
+                self.mem_store_into_after_assign(bx, place, rvalue);
             }
             mir::StatementKind::SetDiscriminant { ref place, variant_index } => {
                 self.codegen_place(bx, (**place).as_ref()).codegen_set_discr(bx, variant_index);

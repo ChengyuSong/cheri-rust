@@ -28,6 +28,14 @@
 //!   read. A partial copy retires the slot with no fact. `-Zcheri-annotate` on a
 //!   CHERI target gates it, the same as the loan facts.
 //!
+//! - `call void @llvm.mem.fact() [ "mem.store_into"(ptr dest, ptr cap) ]` after a
+//!   store of a capability into a nameable local destination (M7.1d B2a): a
+//!   `ptr::read` dest, a `ptr::write` into a local, or a field of a live local
+//!   struct. The late CHERI pass may null `dest` at the source `mem.free` if
+//!   it still holds `cap`. Statics, FFI, and `Box::leak` destinations are not
+//!   emitted. Gated by `-Zcheri-annotate` and `-Zcheri-store-into` (default on;
+//!   `no` is byte-identical to f88cb241).
+//!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
 //! `cheri_bounds.rs`), except that borrow sites are always matched (flagged in `kind`).
@@ -1374,6 +1382,10 @@ pub(crate) struct MemStats {
     /// or because the owner/value could not be named.
     pub loan_into: u32,
     pub loan_into_skipped: u32,
+    /// M7.1d B2a: `mem.store_into` facts emitted, and dests skipped because they
+    /// were not a nameable local (or had no memory address).
+    pub store_into: u32,
+    pub store_into_skipped: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1875,7 +1887,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let s = &self.mem_stats;
         let tcx = self.cx.tcx();
         let line = format!(
-            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\tloan_link_paired={}\tloan_link_lost={}\tloan_slot_aggregate={}\tloan_into={}\tloan_into_skipped={}\n",
+            "MEM-STATS\t{}\tsites_matched={}\tsites_unmatched={}\tguards={}\tguards_missed={}\tfrees={}\tloans_total={}\tloans_eligible={}\tlast_use_points={}\tlast_use_stmts={}\tlast_use_stmts_missed={}\tlast_use_calls={}\tloan_ends={}\tloan_ends_placed={}\tloan_ends_on_call={}\tloan_ends_at_return={}\tloan_ends_missed={}\tloan_ends_carried={}\tloan_starts={}\tloan_slot_stores={}\tloan_slot_copies={}\tloan_starts_missed={}\tloan_slot_ssa={}\tloan_ends_inline_call={}\tloan_ends_backward={}\tloan_link_paired={}\tloan_link_lost={}\tloan_slot_aggregate={}\tloan_into={}\tloan_into_skipped={}\tstore_into={}\tstore_into_skipped={}\n",
             tcx.symbol_name(self.instance).name,
             s.sites_matched,
             s.sites_unmatched,
@@ -1906,6 +1918,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             s.loan_slot_aggregate,
             s.loan_into,
             s.loan_into_skipped,
+            s.store_into,
+            s.store_into_skipped,
         );
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -2508,7 +2522,447 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             LocalRef::PendingOperand | LocalRef::UnsizedPlace(_) => None,
         }
     }
+    /// Emit store_into facts only outside core/alloc/compiler_builtins
+    /// and only in functions where a later wipe is possible.
+    ///
+    /// Facts in core/alloc persist into every rustc crate and perturb
+    /// mid-end even when no wipe is planted (B2a r1/r2: +0.53% bench,
+    /// store_into_nulls=0). Gadget coverage is in the user crate.
+    ///
+    /// Debug/Display::fmt and rust_begin_unwind / panic_impl only format
+    /// or abort: their dests are frame temps that die with the function,
+    /// and there is no reachable mem.free of the stored cap.
+    fn store_into_enabled(&self) -> bool {
+        if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_store_into {
+            return false;
+        }
+        let tcx = self.cx.tcx();
+        let name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
+        if matches!(name.as_str(), "core" | "alloc" | "compiler_builtins") {
+            return false;
+        }
+        self.store_into_fn_ok()
+    }
+
+    /// Debug/Display formatting and the panic hook cannot source a B2a
+    /// wipe (no reachable mem.free of the stored cap; dest dies here).
+    ///
+    /// Also skip functions this crate did not define. Generic methods
+    /// from smallvec / base64 / alloc monomorphized into a bench CGU
+    /// emitted store_into on working pointers (`len_ptr`, `ptr`, the
+    /// `triple_mut` return) that can never be wiped (late pass: all
+    /// unready, nulls=0) but still order against `mem.last_use` and
+    /// reshape the inline-vs-heap CFG of `sv_insert_remove` (+30 B)
+    /// and `SmallVec::try_grow` (+2 B). Gadget facts are emitted in
+    /// the user crate, including `ptr::read`/`ptr::write` at the
+    /// call site.
+    fn store_into_fn_ok(&self) -> bool {
+        let tcx = self.cx.tcx();
+        let def_id = self.instance.def_id();
+        if !def_id.is_local() {
+            return false;
+        }
+        if tcx.lang_items().panic_impl() == Some(def_id) {
+            return false;
+        }
+        // Closures and other nameless items have no item_name (ICE).
+        let Some(name) = tcx.opt_item_name(def_id) else {
+            return true;
+        };
+        if name.as_str() == "rust_begin_unwind" {
+            return false;
+        }
+        if name.as_str() != "fmt" {
+            return true;
+        }
+        let Some(impl_id) = tcx.impl_of_assoc(def_id) else {
+            return true;
+        };
+        let Some(trait_ref) = tcx.impl_opt_trait_ref(impl_id) else {
+            return true;
+        };
+        let trait_id = trait_ref.skip_binder().def_id;
+        !tcx.is_diagnostic_item(rustc_span::sym::Debug, trait_id)
+            && !tcx.is_diagnostic_item(rustc_span::sym::Display, trait_id)
+    }
+
+    /// M7.1d B2a: after a store of a capability into a nameable local dest,
+    /// emit `mem.store_into`(dest, cap). The late pass decides whether to null
+    /// it at the source `mem.free`. rustc does not clear.
+    pub(crate) fn mem_store_into_after_assign(
+        &mut self,
+        bx: &mut Bx,
+        place: &mir::Place<'tcx>,
+        rvalue: &Rvalue<'tcx>,
+    ) {
+        if !self.store_into_enabled() {
+            return;
+        }
+        // Whole-struct / tuple aggregate: fact each capability field of a
+        // nameable local. Enums, unions, closures and raw-ptr aggregates are
+        // skipped: projecting fields on an enum layout ICEs (tag is field 0).
+        if let Rvalue::Aggregate(kind, fields) = rvalue {
+            self.mem_store_into_aggregate(bx, place, kind, fields);
+            return;
+        }
+        let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
+        if !is_store_into_cap_ty(ty) {
+            return;
+        }
+        if !self.store_into_dest_ok(*place) {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        }
+        let Some(dest) = self.store_into_dest_ptr(bx, *place) else {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        };
+        let Some(cap) = self.store_into_cap_val(bx, rvalue) else {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        };
+        bx.mem_fact("mem.store_into", &[dest, cap]);
+        self.mem_stats.store_into += 1;
+    }
+
+    fn mem_store_into_aggregate(
+        &mut self,
+        bx: &mut Bx,
+        place: &mir::Place<'tcx>,
+        kind: &mir::AggregateKind<'tcx>,
+        fields: &rustc_index::IndexVec<rustc_abi::FieldIdx, mir::Operand<'tcx>>,
+    ) {
+        let kind_ok = match kind {
+            mir::AggregateKind::Adt(def, ..) if self.cx.tcx().adt_def(*def).is_struct() => true,
+            mir::AggregateKind::Tuple => true,
+            _ => false,
+        };
+        if !kind_ok {
+            return;
+        }
+        if !self.store_into_dest_ok(*place) {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        }
+        if !matches!(self.locals[place.local], LocalRef::Place(_) | LocalRef::UnsizedPlace(_))
+            && !place.is_indirect()
+        {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        }
+        let dest_pr = self.codegen_place(bx, place.as_ref());
+        let nfields = dest_pr.layout.fields.count();
+        if nfields == 0 {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        }
+        let mut emitted = false;
+        for (i, op) in fields.iter_enumerated() {
+            if i.as_usize() >= nfields {
+                continue;
+            }
+            let flayout = dest_pr.layout.field(bx.cx(), i.as_usize());
+            if !is_store_into_cap_ty(flayout.ty) {
+                continue;
+            }
+            let field_pr = dest_pr.project_field(bx, i.as_usize());
+            let cap_op = self.codegen_operand(bx, op);
+            let Some(cap) = self.store_into_operand_cap(cap_op) else { continue };
+            bx.mem_fact("mem.store_into", &[field_pr.val.llval, cap]);
+            self.mem_stats.store_into += 1;
+            emitted = true;
+        }
+        if !emitted {
+            self.mem_stats.store_into_skipped += 1;
+        }
+    }
+
+    /// Local, field, or constant-index field of a non-`Box` local; or a store
+    /// through a pointer whose MIR origin is such a place (a GEP dest of a
+    /// local `Vec` / field address). Not a static, not a `Box` heap, not an
+    /// unknown / argument raw pointer.
+    fn store_into_dest_ok(&self, place: mir::Place<'tcx>) -> bool {
+        let local_ty = self.monomorphize(self.mir.local_decls[place.local].ty);
+        if local_ty.is_box() {
+            return false;
+        }
+        let mut ty = local_ty;
+        let mut saw_deref = false;
+        for elem in place.projection.iter() {
+            match elem {
+                mir::ProjectionElem::Deref => {
+                    if ty.is_box() {
+                        return false;
+                    }
+                    saw_deref = true;
+                    match ty.builtin_deref(true) {
+                        Some(inner) => ty = inner,
+                        None => return false,
+                    }
+                }
+                mir::ProjectionElem::Field(f, _) => {
+                    let tcx = self.cx.tcx();
+                    ty = match ty.kind() {
+                        ty::Adt(def, args) => {
+                            def.all_fields().nth(f.index()).map(|fd| fd.ty(tcx, args).skip_norm_wip()).unwrap_or(ty)
+                        }
+                        ty::Tuple(ts) => ts.get(f.index()).copied().unwrap_or(ty),
+                        _ => ty,
+                    };
+                    ty = self.monomorphize(ty);
+                    if ty.is_box() {
+                        return false;
+                    }
+                }
+                mir::ProjectionElem::Index(_)
+                | mir::ProjectionElem::ConstantIndex { .. }
+                | mir::ProjectionElem::Subslice { .. } => {
+                    ty = ty.builtin_index().unwrap_or(ty);
+                    ty = self.monomorphize(ty);
+                }
+                mir::ProjectionElem::Downcast(_, _)
+                | mir::ProjectionElem::UnwrapUnsafeBinder(_) => {}
+                mir::ProjectionElem::OpaqueCast(_)
+                | mir::ProjectionElem::PhantomDeref => return false,
+            }
+        }
+        if saw_deref {
+            // Deref of a field/index of this local (a Vec buffer, etc.) is a
+            // nameable container projection. Deref of a pointer local traces
+            // that pointer's origin (ptr::write through &mut local.field).
+            if let Some(first) = place.projection.first() {
+                if !matches!(first, mir::ProjectionElem::Deref) {
+                    return true;
+                }
+            }
+            return self.store_into_ptr_origin_ok(place.local, &mut Default::default());
+        }
+        true
+    }
+
+    fn store_into_ptr_origin_ok(
+        &self,
+        local: mir::Local,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> bool {
+        if !seen.insert(local) {
+            return false;
+        }
+        if local.index() <= self.mir.arg_count {
+            return false;
+        }
+        let ty = self.monomorphize(self.mir.local_decls[local].ty);
+        if ty.is_box() {
+            return false;
+        }
+        let mut found = false;
+        for bb in self.mir.basic_blocks.iter() {
+            for stmt in &bb.statements {
+                let mir::StatementKind::Assign(assign) = &stmt.kind else { continue };
+                if assign.0.as_local() != Some(local) {
+                    continue;
+                }
+                if !self.store_into_rvalue_origin_ok(&assign.1, seen) {
+                    return false;
+                }
+                found = true;
+            }
+        }
+        found
+    }
+
+    fn store_into_rvalue_origin_ok(
+        &self,
+        rvalue: &Rvalue<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> bool {
+        match rvalue {
+            Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => self.store_into_operand_origin_ok(op, seen),
+            Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => self.store_into_place_origin_ok(*p, seen),
+            Rvalue::BinaryOp(op, operands)
+                if matches!(
+                    *op,
+                    mir::BinOp::Offset | mir::BinOp::Add | mir::BinOp::AddUnchecked
+                ) =>
+            {
+                self.store_into_operand_origin_ok(&operands.0, seen)
+            }
+            Rvalue::ThreadLocalRef(_) => false,
+            _ => false,
+        }
+    }
+
+    fn store_into_operand_origin_ok(
+        &self,
+        op: &mir::Operand<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> bool {
+        match op {
+            mir::Operand::Copy(p) | mir::Operand::Move(p) => {
+                self.store_into_place_origin_ok(*p, seen)
+            }
+            mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => false,
+        }
+    }
+
+    fn store_into_place_origin_ok(
+        &self,
+        p: mir::Place<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> bool {
+        let ty = self.monomorphize(self.mir.local_decls[p.local].ty);
+        if ty.is_box() {
+            return false;
+        }
+        if p.projection.is_empty() {
+            // &mut local / &raw mut local names this local's memory, even when
+            // the local itself has pointer type (a ptr::write dest slot).
+            if p.local.index() <= self.mir.arg_count {
+                return false;
+            }
+            return true;
+        }
+        if matches!(p.projection.first(), Some(mir::ProjectionElem::Deref)) {
+            if ty.is_box() {
+                return false;
+            }
+            return self.store_into_ptr_origin_ok(p.local, seen);
+        }
+        // Field / index of a non-box local (Vec buffer, struct field).
+        true
+    }
+
+    fn store_into_dest_ptr(
+        &mut self,
+        bx: &mut Bx,
+        place: mir::Place<'tcx>,
+    ) -> Option<Bx::Value> {
+        // An SSA-only local has no ready memory address; do not invent one.
+        if place.projection.is_empty() {
+            match self.locals[place.local] {
+                LocalRef::Place(_) | LocalRef::UnsizedPlace(_) => {}
+                LocalRef::Operand(_) | LocalRef::PendingOperand => return None,
+            }
+        }
+        let pr = self.codegen_place(bx, place.as_ref());
+        Some(pr.val.llval)
+    }
+
+    fn store_into_cap_val(&mut self, bx: &mut Bx, rvalue: &Rvalue<'tcx>) -> Option<Bx::Value> {
+        match rvalue {
+            Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => {
+                let cap_op = self.codegen_operand(bx, op);
+                self.store_into_operand_cap(cap_op)
+            }
+            Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
+                let pr = self.codegen_place(bx, p.as_ref());
+                Some(pr.val.llval)
+            }
+            _ => None,
+        }
+    }
+
+    fn store_into_operand_cap(
+        &self,
+        op: crate::mir::operand::OperandRef<'tcx, Bx::Value>,
+    ) -> Option<Bx::Value> {
+        match op.val {
+            crate::mir::operand::OperandValue::Immediate(v) => Some(v),
+            crate::mir::operand::OperandValue::Pair(a, _) => Some(a),
+            crate::mir::operand::OperandValue::ZeroSized => None,
+            crate::mir::operand::OperandValue::Ref(place) => Some(place.llval),
+        }
+    }
+
+    fn is_ptr_write_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
+        let name = s.rsplit("::").next().unwrap_or("");
+        // B2a names ptr::write / write_unaligned dests. write_volatile is
+        // used by the official trackb u0 control, which compares a dangling
+        // pointer address after free and must not be snap-nulled.
+        matches!(name, "write" | "write_unaligned") && s.contains("::ptr::")
+    }
+
+    fn is_ptr_read_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
+        let name = s.rsplit("::").next().unwrap_or("");
+        matches!(name, "read" | "read_unaligned" | "read_volatile") && s.contains("::ptr::")
+    }
+
+    /// After a call: fact a cap return stored into a nameable local (ptr::read),
+    /// or a ptr::write into a nameable dest pointer.
+    pub(crate) fn mem_store_into_on_call(
+        &mut self,
+        bx: &mut Bx,
+        instance: Option<ty::Instance<'tcx>>,
+        llargs: &[Bx::Value],
+        llret: Option<Bx::Value>,
+    ) {
+        if !self.store_into_enabled() {
+            self.mem_store_into_ret = None;
+            self.mem_store_into_arg0 = None;
+            return;
+        }
+        if let Some(inst) = instance
+            && self.is_ptr_write_fn(inst)
+            && llargs.len() >= 2
+        {
+            if let Some(arg0) = self.mem_store_into_arg0.take() {
+                let dest_ok = match arg0 {
+                    mir::Operand::Copy(p) | mir::Operand::Move(p) => {
+                        // The dest pointer should originate at a nameable local.
+                        let mut deref = p;
+                        if !p.projection.iter().any(|e| matches!(e, mir::ProjectionElem::Deref)) {
+                            deref = p.project_deeper(&[mir::ProjectionElem::Deref], self.cx.tcx());
+                        }
+                        self.store_into_dest_ok(p) || self.store_into_dest_ok(deref)
+                            || self.store_into_place_origin_ok(p, &mut Default::default())
+                    }
+                    mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => false,
+                };
+                if dest_ok {
+                    bx.mem_fact("mem.store_into", &[llargs[0], llargs[1]]);
+                    self.mem_stats.store_into += 1;
+                } else {
+                    self.mem_stats.store_into_skipped += 1;
+                }
+            }
+        } else {
+            self.mem_store_into_arg0 = None;
+        }
+        if let (Some(place), Some(cap), Some(inst)) =
+            (self.mem_store_into_ret.take(), llret, instance)
+        {
+            if self.is_ptr_read_fn(inst) {
+                let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
+                if is_store_into_cap_ty(ty) && self.store_into_dest_ok(place) {
+                    if let Some(dest) = self.store_into_dest_ptr(bx, place) {
+                        bx.mem_fact("mem.store_into", &[dest, cap]);
+                        self.mem_stats.store_into += 1;
+                    } else {
+                        self.mem_stats.store_into_skipped += 1;
+                    }
+                }
+            }
+        } else {
+            self.mem_store_into_ret = None;
+        }
+    }
 }
+
+fn is_store_into_cap_ty(ty: Ty<'_>) -> bool {
+    match ty.kind() {
+        ty::Ref(..) => true,
+        ty::RawPtr(_, _) if !ty.is_fn_ptr() => true,
+        _ => false,
+    }
+}
+
+
 
 fn operand_local(op: &Operand<'_>) -> Option<mir::Local> {
     match op {

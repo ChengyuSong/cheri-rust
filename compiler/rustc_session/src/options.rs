@@ -2450,6 +2450,8 @@ options! {
          `!mem.guard`, `llvm.mem.claim`, `mem.alloc_inbounds` facts, `\"mem.free\"`, \
          `!mem.last_use`, `\"mem.move\"`) for the late LLVM CHERI passes; rustc itself \
          makes no CHERI decision (default: yes; CHERI targets only)"),
+    cheri_store_into: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),
