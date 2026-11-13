@@ -2569,7 +2569,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         fields: &rustc_index::IndexVec<rustc_abi::FieldIdx, mir::Operand<'tcx>>,
     ) {
         let kind_ok = match kind {
-            mir::AggregateKind::Adt(def, ..) if def.is_struct() => true,
+            mir::AggregateKind::Adt(def, ..) if self.cx.tcx().adt_def(*def).is_struct() => true,
             mir::AggregateKind::Tuple => true,
             _ => false,
         };
