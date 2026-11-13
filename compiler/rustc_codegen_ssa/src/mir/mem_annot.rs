@@ -2751,8 +2751,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return false;
         }
         if p.projection.is_empty() {
-            if ty.is_any_ptr() {
-                return self.store_into_ptr_origin_ok(p.local, seen);
+            // &mut local / &raw mut local names this local's memory, even when
+            // the local itself has pointer type (a ptr::write dest slot).
+            if p.local.index() <= self.mir.arg_count {
+                return false;
             }
             return true;
         }
@@ -2805,6 +2807,68 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             crate::mir::operand::OperandValue::Pair(a, _) => Some(a),
             crate::mir::operand::OperandValue::ZeroSized => None,
             crate::mir::operand::OperandValue::Ref(place) => Some(place.llval),
+        }
+    }
+
+    fn is_ptr_write_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = self.cx.tcx().def_path_str(instance.def_id());
+        let name = s.rsplit("::").next().unwrap_or("");
+        matches!(name, "write" | "write_unaligned" | "write_volatile") && s.contains("::ptr::")
+    }
+
+    /// After a call: fact a cap return stored into a nameable local (ptr::read),
+    /// or a ptr::write into a nameable dest pointer.
+    pub(crate) fn mem_store_into_on_call(
+        &mut self,
+        bx: &mut Bx,
+        instance: Option<ty::Instance<'tcx>>,
+        llargs: &[Bx::Value],
+        llret: Option<Bx::Value>,
+    ) {
+        if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_store_into {
+            self.mem_store_into_ret = None;
+            self.mem_store_into_arg0 = None;
+            return;
+        }
+        if let Some(inst) = instance
+            && self.is_ptr_write_fn(inst)
+            && llargs.len() >= 2
+        {
+            if let Some(arg0) = self.mem_store_into_arg0.take() {
+                let dest_ok = match arg0 {
+                    mir::Operand::Copy(p) | mir::Operand::Move(p) => {
+                        // The dest pointer should originate at a nameable local.
+                        let mut deref = p;
+                        if !p.projection.iter().any(|e| matches!(e, mir::ProjectionElem::Deref)) {
+                            deref = p.project_deeper(&[mir::ProjectionElem::Deref], self.cx.tcx());
+                        }
+                        self.store_into_dest_ok(p) || self.store_into_dest_ok(deref)
+                            || self.store_into_place_origin_ok(p, &mut Default::default())
+                    }
+                    mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => false,
+                };
+                if dest_ok {
+                    bx.mem_fact("mem.store_into", &[llargs[0], llargs[1]]);
+                    self.mem_stats.store_into += 1;
+                } else {
+                    self.mem_stats.store_into_skipped += 1;
+                }
+            }
+        } else {
+            self.mem_store_into_arg0 = None;
+        }
+        if let (Some(place), Some(cap)) = (self.mem_store_into_ret.take(), llret) {
+            let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
+            if is_store_into_cap_ty(ty) && self.store_into_dest_ok(place) {
+                if let Some(dest) = self.store_into_dest_ptr(bx, place) {
+                    bx.mem_fact("mem.store_into", &[dest, cap]);
+                    self.mem_stats.store_into += 1;
+                } else {
+                    self.mem_stats.store_into_skipped += 1;
+                }
+            }
+        } else {
+            self.mem_store_into_ret = None;
         }
     }
 }

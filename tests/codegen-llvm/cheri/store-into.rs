@@ -29,10 +29,10 @@ struct RawHold {
 
 // ptr::read into a named local. The dest is the local itself.
 // on-LABEL: @read_local(
-// on: mem.store_into
+// on: "mem.store_into"
 // off-LABEL: @read_local(
-// off-NOT: mem.store_into
-// off: ret void
+// off-NOT: "mem.store_into"
+// off: ret
 #[no_mangle]
 pub fn read_local(b: &u64) -> *const u64 {
     let mut v: Vec<&u64> = Vec::with_capacity(1);
@@ -44,10 +44,10 @@ pub fn read_local(b: &u64) -> *const u64 {
 
 // ptr::write into a local MaybeUninit-style slot (a named local dest).
 // on-LABEL: @write_local(
-// on: mem.store_into
+// on: "mem.store_into"
 // off-LABEL: @write_local(
-// off-NOT: mem.store_into
-// off: ret void
+// off-NOT: "mem.store_into"
+// off: ret
 #[no_mangle]
 pub fn write_local(b: &u64) {
     let mut slot: *const u64 = ptr::null();
@@ -57,10 +57,10 @@ pub fn write_local(b: &u64) {
 
 // Store into a field of a live local struct (init and a later ptr::write).
 // on-LABEL: @field_write(
-// on: mem.store_into
+// on: "mem.store_into"
 // off-LABEL: @field_write(
-// off-NOT: mem.store_into
-// off: ret void
+// off-NOT: "mem.store_into"
+// off: ret
 #[no_mangle]
 pub fn field_write(b: &u64) {
     let mut hold = RawHold { _pad: 0, p: ptr::null() };
