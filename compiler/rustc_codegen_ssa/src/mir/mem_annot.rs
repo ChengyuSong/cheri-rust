@@ -2562,12 +2562,17 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if !def_id.is_local() {
             return false;
         }
-        if tcx.lang_items().panic_impl() == Some(def_id)
-            || tcx.item_name(def_id).as_str() == "rust_begin_unwind"
-        {
+        if tcx.lang_items().panic_impl() == Some(def_id) {
             return false;
         }
-        if tcx.item_name(def_id).as_str() != "fmt" {
+        // Closures and other nameless items have no item_name (ICE).
+        let Some(name) = tcx.opt_item_name(def_id) else {
+            return true;
+        };
+        if name.as_str() == "rust_begin_unwind" {
+            return false;
+        }
+        if name.as_str() != "fmt" {
             return true;
         }
         let Some(impl_id) = tcx.impl_of_assoc(def_id) else {
