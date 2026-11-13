@@ -2522,6 +2522,18 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             LocalRef::PendingOperand | LocalRef::UnsizedPlace(_) => None,
         }
     }
+    /// Emit store_into facts only outside core/alloc/compiler_builtins.
+    /// Facts in those crates persist into every rustc crate and perturb
+    /// mid-end even when no wipe is planted (B2a r1: +0.53% bench,
+    /// store_into_nulls=0). Gadget coverage is in the user crate.
+    fn store_into_enabled(&self) -> bool {
+        if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_store_into {
+            return false;
+        }
+        let name = self.cx.tcx().crate_name(rustc_span::def_id::LOCAL_CRATE);
+        !matches!(name.as_str(), "core" | "alloc" | "compiler_builtins")
+    }
+
     /// M7.1d B2a: after a store of a capability into a nameable local dest,
     /// emit `mem.store_into`(dest, cap). The late pass decides whether to null
     /// it at the source `mem.free`. rustc does not clear.
@@ -2531,7 +2543,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         place: &mir::Place<'tcx>,
         rvalue: &Rvalue<'tcx>,
     ) {
-        if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_store_into {
+        if !self.store_into_enabled() {
             return;
         }
         // Whole-struct / tuple aggregate: fact each capability field of a
@@ -2838,7 +2850,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         llargs: &[Bx::Value],
         llret: Option<Bx::Value>,
     ) {
-        if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_store_into {
+        if !self.store_into_enabled() {
             self.mem_store_into_ret = None;
             self.mem_store_into_arg0 = None;
             return;
