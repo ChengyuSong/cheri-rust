@@ -1011,7 +1011,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     ) -> MergingSucc {
         let source_info = mir::SourceInfo { span: fn_span, ..terminator.source_info };
         self.mem_store_into_ret = Some(destination);
-        self.mem_store_into_arg0 = args.first().map(|a| a.node);
+        self.mem_store_into_arg0 = args.first().map(|a| a.node.clone());
 
         // Create the callee. This is a fn ptr or zero-sized and hence a kind of scalar.
         let callee = self.codegen_operand(bx, func);
