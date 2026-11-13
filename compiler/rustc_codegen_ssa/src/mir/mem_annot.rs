@@ -2534,9 +2534,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_store_into {
             return;
         }
-        // Whole-struct aggregate: fact each capability field of a nameable local.
-        if let Rvalue::Aggregate(_, fields) = rvalue {
-            self.mem_store_into_aggregate(bx, place, fields);
+        // Whole-struct / tuple aggregate: fact each capability field of a
+        // nameable local. Enums, unions, closures and raw-ptr aggregates are
+        // skipped: projecting fields on an enum layout ICEs (tag is field 0).
+        if let Rvalue::Aggregate(kind, fields) = rvalue {
+            self.mem_store_into_aggregate(bx, place, kind, fields);
             return;
         }
         let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
@@ -2563,8 +2565,17 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         &mut self,
         bx: &mut Bx,
         place: &mir::Place<'tcx>,
+        kind: &mir::AggregateKind<'tcx>,
         fields: &rustc_index::IndexVec<rustc_abi::FieldIdx, mir::Operand<'tcx>>,
     ) {
+        let kind_ok = match kind {
+            mir::AggregateKind::Adt(def, ..) if def.is_struct() => true,
+            mir::AggregateKind::Tuple => true,
+            _ => false,
+        };
+        if !kind_ok {
+            return;
+        }
         if !self.store_into_dest_ok(*place) {
             self.mem_stats.store_into_skipped += 1;
             return;
@@ -2576,8 +2587,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         }
         let dest_pr = self.codegen_place(bx, place.as_ref());
+        let nfields = dest_pr.layout.fields.count();
+        if nfields == 0 {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        }
         let mut emitted = false;
         for (i, op) in fields.iter_enumerated() {
+            if i.as_usize() >= nfields {
+                continue;
+            }
             let flayout = dest_pr.layout.field(bx.cx(), i.as_usize());
             if !is_store_into_cap_ty(flayout.ty) {
                 continue;
