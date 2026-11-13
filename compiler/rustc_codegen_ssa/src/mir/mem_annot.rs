@@ -2522,16 +2522,63 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             LocalRef::PendingOperand | LocalRef::UnsizedPlace(_) => None,
         }
     }
-    /// Emit store_into facts only outside core/alloc/compiler_builtins.
-    /// Facts in those crates persist into every rustc crate and perturb
-    /// mid-end even when no wipe is planted (B2a r1: +0.53% bench,
+    /// Emit store_into facts only outside core/alloc/compiler_builtins
+    /// and only in functions where a later wipe is possible.
+    ///
+    /// Facts in core/alloc persist into every rustc crate and perturb
+    /// mid-end even when no wipe is planted (B2a r1/r2: +0.53% bench,
     /// store_into_nulls=0). Gadget coverage is in the user crate.
+    ///
+    /// Debug/Display::fmt and rust_begin_unwind / panic_impl only format
+    /// or abort: their dests are frame temps that die with the function,
+    /// and there is no reachable mem.free of the stored cap.
     fn store_into_enabled(&self) -> bool {
         if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_store_into {
             return false;
         }
-        let name = self.cx.tcx().crate_name(rustc_span::def_id::LOCAL_CRATE);
-        !matches!(name.as_str(), "core" | "alloc" | "compiler_builtins")
+        let tcx = self.cx.tcx();
+        let name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
+        if matches!(name.as_str(), "core" | "alloc" | "compiler_builtins") {
+            return false;
+        }
+        self.store_into_fn_ok()
+    }
+
+    /// Debug/Display formatting and the panic hook cannot source a B2a
+    /// wipe (no reachable mem.free of the stored cap; dest dies here).
+    ///
+    /// Also skip functions this crate did not define. Generic methods
+    /// from smallvec / base64 / alloc monomorphized into a bench CGU
+    /// emitted store_into on working pointers (`len_ptr`, `ptr`, the
+    /// `triple_mut` return) that can never be wiped (late pass: all
+    /// unready, nulls=0) but still order against `mem.last_use` and
+    /// reshape the inline-vs-heap CFG of `sv_insert_remove` (+30 B)
+    /// and `SmallVec::try_grow` (+2 B). Gadget facts are emitted in
+    /// the user crate, including `ptr::read`/`ptr::write` at the
+    /// call site.
+    fn store_into_fn_ok(&self) -> bool {
+        let tcx = self.cx.tcx();
+        let def_id = self.instance.def_id();
+        if !def_id.is_local() {
+            return false;
+        }
+        if tcx.lang_items().panic_impl() == Some(def_id)
+            || tcx.item_name(def_id).as_str() == "rust_begin_unwind"
+        {
+            return false;
+        }
+        if tcx.item_name(def_id).as_str() != "fmt" {
+            return true;
+        }
+        let Some(impl_id) = tcx.impl_of_assoc(def_id) else {
+            return true;
+        };
+        let Some(trait_ref) = tcx.impl_opt_trait_ref(impl_id) else {
+            return true;
+        };
+        let trait_id = trait_ref.skip_binder().def_id;
+        !tcx.is_diagnostic_item(rustc_span::sym::Debug, trait_id)
+            && !tcx.is_diagnostic_item(rustc_span::sym::Display, trait_id)
     }
 
     /// M7.1d B2a: after a store of a capability into a nameable local dest,
