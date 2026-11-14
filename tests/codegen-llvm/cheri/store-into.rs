@@ -19,6 +19,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 use core::ptr;
 
 #[repr(C)]
@@ -68,3 +69,33 @@ pub fn field_write(b: &u64) {
     core::hint::black_box(&hold);
 }
 
+
+// B2c: ptr::write into a capacity-only Vec<MaybeUninit<cap>> via as_mut_ptr().add(1).
+// The dest is an indexed heap slot; rustc emits mem.store_into_slot, not a dest GEP.
+// on-LABEL: @write_heap_slot(
+// on: "mem.store_into_slot"
+// off-LABEL: @write_heap_slot(
+// off-NOT: "mem.store_into_slot"
+// off-NOT: "mem.store_into"
+// off: ret
+#[no_mangle]
+pub fn write_heap_slot(b: &u64) {
+    let cap: *const u64 = b;
+    let mut raw: Vec<MaybeUninit<*const u64>> = Vec::with_capacity(2);
+    unsafe { ptr::write(raw.as_mut_ptr().add(1), MaybeUninit::new(cap)) };
+    core::hint::black_box(&raw);
+}
+
+// B2c: variable index into a live local array. Slot fact carries base + off.
+// on-LABEL: @write_array_var(
+// on: "mem.store_into_slot"
+// off-LABEL: @write_array_var(
+// off-NOT: "mem.store_into_slot"
+// off-NOT: "mem.store_into"
+// off: ret
+#[no_mangle]
+pub fn write_array_var(b: &u64, i: usize) {
+    let mut a: [*const u64; 2] = [ptr::null(), ptr::null()];
+    unsafe { ptr::write(a.as_mut_ptr().add(i), b as *const u64) };
+    core::hint::black_box((&a, i));
+}
