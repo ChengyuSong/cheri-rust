@@ -35,6 +35,12 @@
 //!   it still holds `cap`. Statics, FFI, and `Box::leak` destinations are not
 //!   emitted. Gated by `-Zcheri-annotate` and `-Zcheri-store-into` (default on;
 //!   `no` is byte-identical to f88cb241).
+//! - `call void @llvm.mem.fact() [ "mem.store_into_slot"(ptr base, i64 off, ptr cap) ]`
+//!   after a store into an indexed / GEP slot (M7.1d B2c): a `ptr::write` through
+//!   `as_mut_ptr().add(i)`, `get_unchecked_mut`, or a field of a container
+//!   element. `off` is a byte offset (constant or SSA). The dest GEP is not a
+//!   fact operand. The late pass rematerialises `GEP(base, off)` at the source
+//!   free if both are ready and the buffer has not been reallocated.
 //!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
@@ -2522,6 +2528,310 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             LocalRef::PendingOperand | LocalRef::UnsizedPlace(_) => None,
         }
     }
+    fn is_store_into_cap_ty(&self, ty: Ty<'tcx>) -> bool {
+        let ty = self.monomorphize(ty);
+        match *ty.kind() {
+            ty::Ref(..) => true,
+            ty::RawPtr(_, _) if !ty.is_fn_ptr() => true,
+            ty::Adt(def, args)
+                if self.cx.tcx().lang_items().maybe_uninit() == Some(def.did()) =>
+            {
+                self.is_store_into_cap_ty(args.type_at(0))
+            }
+            _ => false,
+        }
+    }
+
+    fn ptr_pointee_size(&self, ty: Ty<'tcx>) -> Option<u64> {
+        let ty = self.monomorphize(ty);
+        let inner = ty.builtin_deref(true)?;
+        Some(self.cx.layout_of(self.monomorphize(inner)).size.bytes())
+    }
+
+    fn slice_elem_size(&self, ty: Ty<'tcx>) -> Option<u64> {
+        let mut ty = self.monomorphize(ty);
+        if let Some(inner) = ty.builtin_deref(true) {
+            ty = self.monomorphize(inner);
+        }
+        if let ty::Slice(elem) | ty::Array(elem, _) = *ty.kind() {
+            return Some(self.cx.layout_of(self.monomorphize(elem)).size.bytes());
+        }
+        if let Some(elem) = ty.builtin_index() {
+            return Some(self.cx.layout_of(self.monomorphize(elem)).size.bytes());
+        }
+        None
+    }
+
+    fn store_into_emit(
+        &mut self,
+        bx: &mut Bx,
+        dest: Bx::Value,
+        cap: Bx::Value,
+        slot: Option<(Bx::Value, Bx::Value)>,
+    ) {
+        if let Some((base, off)) = slot {
+            bx.mem_fact("mem.store_into_slot", &[base, off, cap]);
+        } else {
+            bx.mem_fact("mem.store_into", &[dest, cap]);
+        }
+        self.mem_stats.store_into += 1;
+    }
+
+    fn callee_def_path(&self, func: &mir::Operand<'tcx>) -> Option<String> {
+        let ty = self.monomorphize(func.ty(self.mir, self.cx.tcx()));
+        let ty::FnDef(def_id, _) = *ty.kind() else { return None };
+        Some(rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(def_id)
+        ))
+    }
+
+    fn callee_is(&self, func: &mir::Operand<'tcx>, names: &[&str]) -> bool {
+        let Some(s) = self.callee_def_path(func) else { return false };
+        let name = s.rsplit("::").next().unwrap_or("");
+        names.iter().any(|n| *n == name)
+    }
+
+    /// Byte-offset slot (base, off) for an indexed dest. None for a plain named
+    /// local / field (those keep mem.store_into).
+    fn store_into_place_slot(
+        &mut self,
+        bx: &mut Bx,
+        place: mir::Place<'tcx>,
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        let tcx = self.cx.tcx();
+        let mut ty = self.monomorphize(self.mir.local_decls[place.local].ty);
+        let mut base_len = 0usize;
+        let mut saw_index = false;
+        let mut const_off: u64 = 0;
+        let mut var_terms: Vec<(mir::Local, u64)> = Vec::new();
+        for (i, elem) in place.projection.iter().enumerate() {
+            match elem {
+                mir::ProjectionElem::Deref => {
+                    match ty.builtin_deref(true) {
+                        Some(inner) => ty = self.monomorphize(inner),
+                        None => return None,
+                    }
+                    if !saw_index {
+                        base_len = i + 1;
+                    }
+                }
+                mir::ProjectionElem::Field(f, _) => {
+                    let layout = self.cx.layout_of(ty);
+                    let off = layout.fields.offset(f.as_usize()).bytes();
+                    ty = match ty.kind() {
+                        ty::Adt(def, args) => def
+                            .all_fields()
+                            .nth(f.index())
+                            .map(|fd| self.monomorphize(fd.ty(tcx, args).skip_norm_wip()))
+                            .unwrap_or(ty),
+                        ty::Tuple(ts) => ts.get(f.index()).copied().map(|t| self.monomorphize(t)).unwrap_or(ty),
+                        _ => ty,
+                    };
+                    if saw_index {
+                        const_off = const_off.saturating_add(off);
+                    } else {
+                        base_len = i + 1;
+                    }
+                }
+                mir::ProjectionElem::Index(local) => {
+                    let elem_ty = ty.builtin_index()?;
+                    let stride = self.cx.layout_of(self.monomorphize(elem_ty)).size.bytes();
+                    saw_index = true;
+                    var_terms.push((local, stride));
+                    ty = self.monomorphize(elem_ty);
+                }
+                mir::ProjectionElem::ConstantIndex { offset, .. } => {
+                    let elem_ty = ty.builtin_index()?;
+                    let stride = self.cx.layout_of(self.monomorphize(elem_ty)).size.bytes();
+                    saw_index = true;
+                    const_off = const_off.saturating_add(offset.saturating_mul(stride));
+                    ty = self.monomorphize(elem_ty);
+                }
+                mir::ProjectionElem::Downcast(_, _)
+                | mir::ProjectionElem::UnwrapUnsafeBinder(_) => {}
+                mir::ProjectionElem::Subslice { .. }
+                | mir::ProjectionElem::OpaqueCast(_)
+                | mir::ProjectionElem::PhantomDeref => return None,
+            }
+        }
+        if !saw_index {
+            return None;
+        }
+        let base_place = mir::Place { local: place.local, projection: tcx.mk_place_elems(&place.projection[..base_len]) };
+        let base = self.codegen_place(bx, base_place.as_ref()).val.llval;
+        let mut off = bx.const_usize(const_off);
+        for (local, stride) in var_terms {
+            let idx_op = self.codegen_operand(bx, &mir::Operand::Copy(local.into()));
+            let crate::mir::operand::OperandValue::Immediate(idx) = idx_op.val else {
+                return None;
+            };
+            let term = bx.unchecked_sumul(idx, bx.const_usize(stride));
+            off = bx.add(off, term);
+        }
+        Some((base, off))
+    }
+
+    fn store_into_operand_slot(
+        &mut self,
+        bx: &mut Bx,
+        op: &mir::Operand<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        let (mir::Operand::Copy(p) | mir::Operand::Move(p)) = *op else { return None };
+        if !p.projection.is_empty() {
+            if let Some(s) = self.store_into_place_slot(bx, p) {
+                return Some(s);
+            }
+            if matches!(p.projection.first(), Some(mir::ProjectionElem::Deref))
+                && p.projection.len() == 1
+            {
+                return self.store_into_local_slot(bx, p.local, seen);
+            }
+            return None;
+        }
+        self.store_into_local_slot(bx, p.local, seen)
+    }
+
+    fn store_into_local_slot(
+        &mut self,
+        bx: &mut Bx,
+        local: mir::Local,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        if !seen.insert(local) {
+            return None;
+        }
+        let pointee = self.monomorphize(self.mir.local_decls[local].ty);
+        let mut found = None;
+        for bb in self.mir.basic_blocks.iter() {
+            for stmt in &bb.statements {
+                let mir::StatementKind::Assign(assign) = &stmt.kind else { continue };
+                if assign.0.as_local() != Some(local) {
+                    continue;
+                }
+                found = self.store_into_rvalue_slot(bx, &assign.1, pointee, seen);
+                if found.is_some() {
+                    return found;
+                }
+            }
+            if let mir::TerminatorKind::Call { func, args, destination, .. } = &bb.terminator().kind
+            {
+                if destination.as_local() != Some(local) {
+                    continue;
+                }
+                found = self.store_into_call_slot(bx, func, args, pointee, seen);
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        found
+    }
+
+    fn store_into_rvalue_slot(
+        &mut self,
+        bx: &mut Bx,
+        rvalue: &Rvalue<'tcx>,
+        pointee: Ty<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        match rvalue {
+            Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => self.store_into_operand_slot(bx, op, seen),
+            Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => self.store_into_place_slot(bx, *p).or_else(|| {
+                if p.projection.is_empty() {
+                    self.store_into_local_slot(bx, p.local, seen)
+                } else {
+                    None
+                }
+            }),
+            Rvalue::BinaryOp(op, operands)
+                if matches!(
+                    *op,
+                    mir::BinOp::Offset | mir::BinOp::Add | mir::BinOp::AddUnchecked
+                ) =>
+            {
+                let stride = self.ptr_pointee_size(pointee)?;
+                let (base, base_off) = match self.store_into_operand_slot(bx, &operands.0, seen) {
+                    Some(s) => s,
+                    None => {
+                        let b = self.codegen_operand(bx, &operands.0);
+                        match b.val {
+                            crate::mir::operand::OperandValue::Immediate(v) => (v, bx.const_usize(0)),
+                            crate::mir::operand::OperandValue::Pair(v, _) => (v, bx.const_usize(0)),
+                            crate::mir::operand::OperandValue::Ref(pl) => (pl.llval, bx.const_usize(0)),
+                            crate::mir::operand::OperandValue::ZeroSized => return None,
+                        }
+                    }
+                };
+                let idx_op = self.codegen_operand(bx, &operands.1);
+                let crate::mir::operand::OperandValue::Immediate(idx) = idx_op.val else {
+                    return None;
+                };
+                let term = bx.unchecked_sumul(idx, bx.const_usize(stride));
+                Some((base, bx.add(base_off, term)))
+            }
+            _ => None,
+        }
+    }
+
+    fn store_into_call_slot(
+        &mut self,
+        bx: &mut Bx,
+        func: &mir::Operand<'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        pointee: Ty<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        if self.callee_is(func, &["add", "offset", "wrapping_add", "wrapping_offset"])
+            && args.len() >= 2
+        {
+            let stride = self.ptr_pointee_size(pointee).or_else(|| {
+                self.ptr_pointee_size(self.monomorphize(args[0].node.ty(self.mir, self.cx.tcx())))
+            })?;
+            let (base, base_off) = match self.store_into_operand_slot(bx, &args[0].node, seen) {
+                Some(s) => s,
+                None => {
+                    let b = self.codegen_operand(bx, &args[0].node);
+                    match b.val {
+                        crate::mir::operand::OperandValue::Immediate(v) => (v, bx.const_usize(0)),
+                        crate::mir::operand::OperandValue::Pair(v, _) => (v, bx.const_usize(0)),
+                        crate::mir::operand::OperandValue::Ref(pl) => (pl.llval, bx.const_usize(0)),
+                        _ => return None,
+                    }
+                }
+            };
+            let idx_op = self.codegen_operand(bx, &args[1].node);
+            let crate::mir::operand::OperandValue::Immediate(idx) = idx_op.val else {
+                return None;
+            };
+            let term = bx.unchecked_sumul(idx, bx.const_usize(stride));
+            return Some((base, bx.add(base_off, term)));
+        }
+        if self.callee_is(func, &["get_unchecked_mut", "index_mut", "get_mut"]) && args.len() >= 2
+        {
+            let recv_ty = self.monomorphize(args[0].node.ty(self.mir, self.cx.tcx()));
+            let stride = self.slice_elem_size(recv_ty).or_else(|| self.ptr_pointee_size(pointee))?;
+            let base = match self.codegen_operand(bx, &args[0].node).val {
+                crate::mir::operand::OperandValue::Immediate(v) => v,
+                crate::mir::operand::OperandValue::Pair(v, _) => v,
+                crate::mir::operand::OperandValue::Ref(pl) => pl.llval,
+                _ => return None,
+            };
+            let idx_op = self.codegen_operand(bx, &args[1].node);
+            let crate::mir::operand::OperandValue::Immediate(idx) = idx_op.val else {
+                return None;
+            };
+            let off = bx.unchecked_sumul(idx, bx.const_usize(stride));
+            return Some((base, off));
+        }
+        if self.callee_is(func, &["as_mut_ptr", "as_ptr"]) && args.len() >= 1 {
+            // Buffer pointer itself; a later offset composes. Alone this is not
+            // an indexed slot.
+            return None;
+        }
+        None
+    }
+
     /// Emit store_into facts only outside core/alloc/compiler_builtins
     /// and only in functions where a later wipe is possible.
     ///
@@ -2606,7 +2916,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         }
         let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
-        if !is_store_into_cap_ty(ty) {
+        if !self.is_store_into_cap_ty(ty) {
             return;
         }
         if !self.store_into_dest_ok(*place) {
@@ -2621,8 +2931,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.mem_stats.store_into_skipped += 1;
             return;
         };
-        bx.mem_fact("mem.store_into", &[dest, cap]);
-        self.mem_stats.store_into += 1;
+        let slot = self.store_into_place_slot(bx, *place);
+        self.store_into_emit(bx, dest, cap, slot);
     }
 
     fn mem_store_into_aggregate(
@@ -2662,14 +2972,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 continue;
             }
             let flayout = dest_pr.layout.field(bx.cx(), i.as_usize());
-            if !is_store_into_cap_ty(flayout.ty) {
+            if !self.is_store_into_cap_ty(flayout.ty) {
                 continue;
             }
             let field_pr = dest_pr.project_field(bx, i.as_usize());
             let cap_op = self.codegen_operand(bx, op);
             let Some(cap) = self.store_into_operand_cap(cap_op) else { continue };
-            bx.mem_fact("mem.store_into", &[field_pr.val.llval, cap]);
-            self.mem_stats.store_into += 1;
+            let slot = self.store_into_place_slot(bx, *place);
+            self.store_into_emit(bx, field_pr.val.llval, cap, slot);
             emitted = true;
         }
         if !emitted {
@@ -2766,6 +3076,34 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     return false;
                 }
                 found = true;
+            }
+            if let mir::TerminatorKind::Call { func, args, destination, .. } = &bb.terminator().kind
+            {
+                if destination.as_local() != Some(local) {
+                    continue;
+                }
+                if self.callee_is(
+                    func,
+                    &[
+                        "as_mut_ptr",
+                        "as_ptr",
+                        "add",
+                        "offset",
+                        "wrapping_add",
+                        "wrapping_offset",
+                        "get_unchecked_mut",
+                        "index_mut",
+                        "get_mut",
+                    ],
+                ) {
+                    let Some(a0) = args.first() else { return false };
+                    if !self.store_into_operand_origin_ok(&a0.node, seen) {
+                        return false;
+                    }
+                    found = true;
+                    continue;
+                }
+                return false;
             }
         }
         found
@@ -2925,8 +3263,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => false,
                 };
                 if dest_ok {
-                    bx.mem_fact("mem.store_into", &[llargs[0], llargs[1]]);
-                    self.mem_stats.store_into += 1;
+                    let slot = self.store_into_operand_slot(bx, &arg0, &mut Default::default());
+                    self.store_into_emit(bx, llargs[0], llargs[1], slot);
                 } else {
                     self.mem_stats.store_into_skipped += 1;
                 }
@@ -2939,10 +3277,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         {
             if self.is_ptr_read_fn(inst) {
                 let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
-                if is_store_into_cap_ty(ty) && self.store_into_dest_ok(place) {
+                if self.is_store_into_cap_ty(ty) && self.store_into_dest_ok(place) {
                     if let Some(dest) = self.store_into_dest_ptr(bx, place) {
-                        bx.mem_fact("mem.store_into", &[dest, cap]);
-                        self.mem_stats.store_into += 1;
+                        let slot = self.store_into_place_slot(bx, place);
+                        self.store_into_emit(bx, dest, cap, slot);
                     } else {
                         self.mem_stats.store_into_skipped += 1;
                     }
@@ -2954,13 +3292,6 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     }
 }
 
-fn is_store_into_cap_ty(ty: Ty<'_>) -> bool {
-    match ty.kind() {
-        ty::Ref(..) => true,
-        ty::RawPtr(_, _) if !ty.is_fn_ptr() => true,
-        _ => false,
-    }
-}
 
 
 
