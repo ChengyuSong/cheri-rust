@@ -177,11 +177,12 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
 
     /// M5r: marker counts (`MEM_ANNOT_STATS_FILE`).
     mem_stats: mem_annot::MemStats,
-    /// M7.1d B2a: MIR dest and args of the Call being lowered, so a
-    /// `mem.store_into` can be emitted after the call (ptr::read dest, or
-    /// ptr::write into a nameable local).
+    /// M7.1d B2a / B2c-3a: MIR dest and args of the Call being lowered, so a
+    /// `mem.store_into` can be emitted after the call (ptr::read dest,
+    /// ptr::write into a nameable local, or Vec::push / extend / IndexMut).
     mem_store_into_ret: Option<mir::Place<'tcx>>,
     mem_store_into_arg0: Option<mir::Operand<'tcx>>,
+    mem_store_into_args: Vec<mir::Operand<'tcx>>,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -345,6 +346,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         mem_stats: Default::default(),
         mem_store_into_ret: None,
         mem_store_into_arg0: None,
+        mem_store_into_args: Vec::new(),
     };
     fx.cheri_sites = fx.find_cheri_index_sites();
     if !cx.tcx().sess.opts.unstable_opts.cheri_loan_ends {

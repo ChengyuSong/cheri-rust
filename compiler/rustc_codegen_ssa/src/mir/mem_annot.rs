@@ -38,9 +38,14 @@
 //! - `call void @llvm.mem.fact() [ "mem.store_into_slot"(ptr base, i64 off, ptr cap) ]`
 //!   after a store into an indexed / GEP slot (M7.1d B2c): a `ptr::write` through
 //!   `as_mut_ptr().add(i)`, `get_unchecked_mut`, or a field of a container
-//!   element. `off` is a byte offset (constant or SSA). The dest GEP is not a
-//!   fact operand. The late pass rematerialises `GEP(base, off)` at the source
-//!   free if both are ready and the buffer has not been reallocated.
+//!   element. B2c-3a also emits this after a user-crate `Vec::push` / `push_mut`
+//!   / `extend*` call (post-grow buffer, offset `(len-1)*stride` or the
+//!   extended range) and after an IndexMut-style `v[i] = cap` into a nameable
+//!   local `Vec`. `off` is a byte offset (constant or SSA). The dest GEP is
+//!   not a fact operand. The late pass rematerialises `GEP(base, off)` at the
+//!   source free if both are ready and the buffer has not been reallocated
+//!   *after* the fact. Facts are never emitted in core/alloc or in non-local
+//!   monomorphized functions.
 //!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
@@ -2658,7 +2663,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return None;
         }
         let base_place = mir::Place { local: place.local, projection: tcx.mk_place_elems(&place.projection[..base_len]) };
-        let base = self.codegen_place(bx, base_place.as_ref()).val.llval;
+        let mut base = self.codegen_place(bx, base_place.as_ref()).val.llval;
+        if let Some((buf, _, _)) = self.store_into_vec_header_from_local(bx, place.local) {
+            base = buf;
+        }
         let mut off = bx.const_usize(const_off);
         for (local, stride) in var_terms {
             let idx_op = self.codegen_operand(bx, &mir::Operand::Copy(local.into()));
@@ -2811,11 +2819,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         {
             let recv_ty = self.monomorphize(args[0].node.ty(self.mir, self.cx.tcx()));
             let stride = self.slice_elem_size(recv_ty).or_else(|| self.ptr_pointee_size(pointee))?;
-            let base = match self.codegen_operand(bx, &args[0].node).val {
-                crate::mir::operand::OperandValue::Immediate(v) => v,
-                crate::mir::operand::OperandValue::Pair(v, _) => v,
-                crate::mir::operand::OperandValue::Ref(pl) => pl.llval,
-                _ => return None,
+            let base = if let Some((buf, _, st)) = self.store_into_vec_header(bx, &args[0].node) {
+                let _ = st;
+                buf
+            } else {
+                match self.codegen_operand(bx, &args[0].node).val {
+                    crate::mir::operand::OperandValue::Immediate(v) => v,
+                    crate::mir::operand::OperandValue::Pair(v, _) => v,
+                    crate::mir::operand::OperandValue::Ref(pl) => pl.llval,
+                    _ => return None,
+                }
             };
             let idx_op = self.codegen_operand(bx, &args[1].node);
             let crate::mir::operand::OperandValue::Immediate(idx) = idx_op.val else {
@@ -2830,6 +2843,198 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return None;
         }
         None
+    }
+
+
+    /// If `ty` (after peeling refs / raw pointers) is `Vec<T>`, return `T`.
+    fn store_into_vec_elem_ty(&self, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
+        let mut ty = self.monomorphize(ty);
+        for _ in 0..4 {
+            if let Some(inner) = ty.builtin_deref(true) {
+                ty = self.monomorphize(inner);
+                continue;
+            }
+            break;
+        }
+        self.store_into_bare_vec_elem_ty(ty)
+    }
+
+    /// `Vec<T>` itself, not a reference or pointer to one.
+    fn store_into_bare_vec_elem_ty(&self, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
+        let ty = self.monomorphize(ty);
+        if let ty::Adt(def, args) = *ty.kind()
+            && self.cx.tcx().is_diagnostic_item(rustc_span::sym::Vec, def.did())
+        {
+            return Some(self.monomorphize(args.type_at(0)));
+        }
+        None
+    }
+
+    /// Trace an operand / place / local back to a nameable local `Vec` (not an
+    /// argument or static). Walks `&mut v`, transmutes, and `*mut [T] from (ptr, len)`
+    /// aggregates produced by MIR-inlined `IndexMut`.
+    fn store_into_vec_local_from_operand(
+        &self,
+        op: &mir::Operand<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<mir::Local> {
+        match op {
+            mir::Operand::Copy(p) | mir::Operand::Move(p) => self.store_into_vec_local_from_place(*p, seen),
+            mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => None,
+        }
+    }
+
+    fn store_into_vec_local_from_place(
+        &self,
+        p: mir::Place<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<mir::Local> {
+        let local_ty = self.monomorphize(self.mir.local_decls[p.local].ty);
+        // Only the Vec alloca itself (possibly with field projections into
+        // buf/ptr). A `&mut Vec` local must be walked to the referenced Vec;
+        // treating the reference as the Vec makes load_vec_header fail
+        // (no Place / no len field).
+        if self.store_into_bare_vec_elem_ty(local_ty).is_some() {
+            if p.local.index() <= self.mir.arg_count {
+                return None;
+            }
+            return Some(p.local);
+        }
+        if p.projection.first().is_some_and(|e| matches!(e, mir::ProjectionElem::Deref))
+            || p.projection.is_empty()
+        {
+            return self.store_into_vec_local_from_ssa(p.local, seen);
+        }
+        None
+    }
+
+    fn store_into_vec_local_from_ssa(
+        &self,
+        local: mir::Local,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<mir::Local> {
+        if !seen.insert(local) {
+            return None;
+        }
+        if local.index() <= self.mir.arg_count {
+            return None;
+        }
+        if self.store_into_bare_vec_elem_ty(self.monomorphize(self.mir.local_decls[local].ty)).is_some()
+        {
+            return Some(local);
+        }
+        for bb in self.mir.basic_blocks.iter() {
+            for stmt in &bb.statements {
+                let mir::StatementKind::Assign(assign) = &stmt.kind else { continue };
+                if assign.0.as_local() != Some(local) {
+                    continue;
+                }
+                if let Some(v) = self.store_into_vec_local_from_rvalue(&assign.1, seen) {
+                    return Some(v);
+                }
+            }
+            if let mir::TerminatorKind::Call { func, args, destination, .. } = &bb.terminator().kind
+                && destination.as_local() == Some(local)
+            {
+                if self.callee_is(
+                    func,
+                    &[
+                        "as_mut_ptr",
+                        "as_ptr",
+                        "as_mut_slice",
+                        "as_slice",
+                        "index_mut",
+                        "index",
+                        "get_mut",
+                        "get_unchecked_mut",
+                        "deref",
+                        "deref_mut",
+                    ],
+                ) && let Some(a0) = args.first()
+                {
+                    if let Some(v) = self.store_into_vec_local_from_operand(&a0.node, seen) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn store_into_vec_local_from_rvalue(
+        &self,
+        rvalue: &Rvalue<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<mir::Local> {
+        match rvalue {
+            Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => {
+                self.store_into_vec_local_from_operand(op, seen)
+            }
+            Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
+                self.store_into_vec_local_from_place(*p, seen)
+            }
+            Rvalue::Aggregate(kind, ops) if matches!(**kind, mir::AggregateKind::RawPtr(..)) => {
+                ops.iter().next().and_then(|op| self.store_into_vec_local_from_operand(op, seen))
+            }
+            _ => None,
+        }
+    }
+
+    /// Load the current heap buffer pointer, `len`, and element stride of a
+    /// nameable local `Vec` (post-call, so after any grow that `push` did).
+    fn store_into_load_vec_header(
+        &mut self,
+        bx: &mut Bx,
+        vec_local: mir::Local,
+    ) -> Option<(Bx::Value, Bx::Value, u64)> {
+        let LocalRef::Place(vec_pr) = self.locals[vec_local] else {
+            return None;
+        };
+        let vec_ty = self.monomorphize(self.mir.local_decls[vec_local].ty);
+        let elem_ty = self.store_into_vec_elem_ty(vec_ty)?;
+        let stride = self.cx.layout_of(elem_ty).size.bytes();
+        if stride == 0 {
+            return None;
+        }
+        let ptr_off = self.loan_into_ptr_offset(vec_ty)?;
+        let layout = self.cx.layout_of(vec_ty);
+        if layout.fields.count() < 2 {
+            return None;
+        }
+        let ptr_align = bx.data_layout().pointer_align().abi;
+        let buf_addr = if ptr_off == 0 {
+            vec_pr.val.llval
+        } else {
+            bx.inbounds_ptradd(vec_pr.val.llval, bx.const_usize(ptr_off))
+        };
+        let buf = bx.load(bx.type_ptr(), buf_addr, ptr_align);
+        let len_off = layout.fields.offset(1).bytes();
+        let len_layout = layout.field(self.cx, 1);
+        let len_addr = if len_off == 0 {
+            vec_pr.val.llval
+        } else {
+            bx.inbounds_ptradd(vec_pr.val.llval, bx.const_usize(len_off))
+        };
+        let len = bx.load(bx.type_isize(), len_addr, len_layout.align.abi);
+        Some((buf, len, stride))
+    }
+
+    fn store_into_vec_header(
+        &mut self,
+        bx: &mut Bx,
+        op: &mir::Operand<'tcx>,
+    ) -> Option<(Bx::Value, Bx::Value, u64)> {
+        let vec_local = self.store_into_vec_local_from_operand(op, &mut Default::default())?;
+        self.store_into_load_vec_header(bx, vec_local)
+    }
+
+    fn store_into_vec_header_from_local(
+        &mut self,
+        bx: &mut Bx,
+        local: mir::Local,
+    ) -> Option<(Bx::Value, Bx::Value, u64)> {
+        let vec_local = self.store_into_vec_local_from_ssa(local, &mut Default::default())?;
+        self.store_into_load_vec_header(bx, vec_local)
     }
 
     /// Emit store_into facts only outside core/alloc/compiler_builtins
@@ -2931,7 +3136,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.mem_stats.store_into_skipped += 1;
             return;
         };
-        let slot = self.store_into_place_slot(bx, *place);
+        let mut slot = self.store_into_place_slot(bx, *place);
+        if slot.is_none()
+            && place.projection.len() == 1
+            && matches!(place.projection[0], mir::ProjectionElem::Deref)
+        {
+            slot = self.store_into_local_slot(bx, place.local, &mut Default::default());
+        }
         self.store_into_emit(bx, dest, cap, slot);
     }
 
@@ -3117,6 +3328,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         match rvalue {
             Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => self.store_into_operand_origin_ok(op, seen),
             Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => self.store_into_place_origin_ok(*p, seen),
+            Rvalue::Aggregate(kind, ops) if matches!(**kind, mir::AggregateKind::RawPtr(..)) => {
+                ops.iter().next().is_some_and(|op| self.store_into_operand_origin_ok(op, seen))
+            }
             Rvalue::BinaryOp(op, operands)
                 if matches!(
                     *op,
@@ -3243,6 +3457,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if !self.store_into_enabled() {
             self.mem_store_into_ret = None;
             self.mem_store_into_arg0 = None;
+            self.mem_store_into_args.clear();
             return;
         }
         if let Some(inst) = instance
@@ -3289,6 +3504,198 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         } else {
             self.mem_store_into_ret = None;
         }
+        if let Some(inst) = instance {
+            self.mem_store_into_on_vec_call(bx, inst);
+        }
+        self.mem_store_into_args.clear();
+    }
+
+    fn is_vec_push_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
+        let name = s.rsplit("::").next().unwrap_or("");
+        matches!(name, "push" | "push_mut")
+    }
+
+    fn is_vec_extend_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
+        let name = s.rsplit("::").next().unwrap_or("");
+        matches!(
+            name,
+            "extend_from_slice"
+                | "extend_from_within"
+                | "append"
+                | "extend"
+        )
+    }
+
+    /// After a user-crate `Vec::push` / `push_mut` / `extend*` call: fact the
+    /// post-grow dest slot(s). The late pass skips only a later realloc.
+    fn mem_store_into_on_vec_call(&mut self, bx: &mut Bx, inst: ty::Instance<'tcx>) {
+        if self.mem_store_into_args.is_empty() {
+            return;
+        }
+        let recv = self.mem_store_into_args[0].clone();
+        if self.store_into_vec_elem_ty(self.monomorphize(recv.ty(self.mir, self.cx.tcx()))).is_none()
+        {
+            return;
+        }
+        if !self.store_into_operand_origin_ok(&recv, &mut Default::default())
+            && self.store_into_vec_local_from_operand(&recv, &mut Default::default()).is_none()
+        {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        }
+        let Some((buf, len, stride)) = self.store_into_vec_header(bx, &recv) else {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        };
+        if self.is_vec_push_fn(inst) {
+            if self.mem_store_into_args.len() < 2 {
+                self.mem_stats.store_into_skipped += 1;
+                return;
+            }
+            let cap_op = self.mem_store_into_args[1].clone();
+            let cap_ty = self.monomorphize(cap_op.ty(self.mir, self.cx.tcx()));
+            if !self.is_store_into_cap_ty(cap_ty) {
+                return;
+            }
+            let cap_ref = self.codegen_operand(bx, &cap_op);
+            let Some(cap) = self.store_into_operand_cap(cap_ref) else {
+                self.mem_stats.store_into_skipped += 1;
+                return;
+            };
+            let last = bx.sub(len, bx.const_usize(1));
+            let off = bx.unchecked_sumul(last, bx.const_usize(stride));
+            self.store_into_emit(bx, buf, cap, Some((buf, off)));
+            return;
+        }
+        if self.is_vec_extend_fn(inst) {
+            if self.mem_store_into_args.len() < 2 {
+                self.mem_stats.store_into_skipped += 1;
+                return;
+            }
+            let src = self.mem_store_into_args[1].clone();
+            let Some((arr, n, elem_ty)) = self.store_into_extend_src(&src) else {
+                // Source elements are not a nameable local array / fixed slice.
+                return;
+            };
+            if !self.is_store_into_cap_ty(elem_ty) || n == 0 {
+                return;
+            }
+            let old = bx.sub(len, bx.const_usize(n));
+            let old_bytes = bx.unchecked_sumul(old, bx.const_usize(stride));
+            let mut emitted = false;
+            for i in 0..n {
+                let elem = arr.project_deeper(
+                    &[mir::ProjectionElem::ConstantIndex {
+                        offset: i,
+                        min_length: n,
+                        from_end: false,
+                    }],
+                    self.cx.tcx(),
+                );
+                let cap_op = self.codegen_operand(bx, &mir::Operand::Copy(elem));
+                let Some(cap) = self.store_into_operand_cap(cap_op) else { continue };
+                let off = bx.add(old_bytes, bx.const_usize(i.saturating_mul(stride)));
+                self.store_into_emit(bx, buf, cap, Some((buf, off)));
+                emitted = true;
+            }
+            if !emitted {
+                self.mem_stats.store_into_skipped += 1;
+            }
+        }
+    }
+
+    /// A nameable local array (or ref/unsize to a slice of one) used as the
+    /// source of `extend_from_slice`. Returns the array place, element count,
+    /// and element type.
+    fn store_into_extend_src(
+        &self,
+        op: &mir::Operand<'tcx>,
+    ) -> Option<(mir::Place<'tcx>, u64, Ty<'tcx>)> {
+        self.store_into_extend_src_op(op, &mut Default::default())
+    }
+
+    fn store_into_extend_src_op(
+        &self,
+        op: &mir::Operand<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<(mir::Place<'tcx>, u64, Ty<'tcx>)> {
+        match op {
+            mir::Operand::Copy(p) | mir::Operand::Move(p) => {
+                self.store_into_extend_src_place(*p, seen)
+            }
+            mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => None,
+        }
+    }
+
+    fn store_into_extend_src_place(
+        &self,
+        p: mir::Place<'tcx>,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<(mir::Place<'tcx>, u64, Ty<'tcx>)> {
+        let ty = self.monomorphize(p.ty(&self.mir.local_decls, self.cx.tcx()).ty);
+        if let ty::Array(elem, n) = *ty.kind() {
+            let n = self.monomorphize(n).try_to_target_usize(self.cx.tcx())?;
+            if p.local.index() <= self.mir.arg_count {
+                return None;
+            }
+            return Some((p, n, self.monomorphize(elem)));
+        }
+        if p.projection.is_empty() || p.projection.first().is_some_and(|e| matches!(e, mir::ProjectionElem::Deref))
+        {
+            return self.store_into_extend_src_local(p.local, seen);
+        }
+        // `&arr` / `(*ref)` of an array.
+        if matches!(ty.kind(), ty::Ref(..) | ty::RawPtr(..)) {
+            return self.store_into_extend_src_local(p.local, seen);
+        }
+        let _ = seen;
+        None
+    }
+
+    fn store_into_extend_src_local(
+        &self,
+        local: mir::Local,
+        seen: &mut rustc_data_structures::fx::FxHashSet<mir::Local>,
+    ) -> Option<(mir::Place<'tcx>, u64, Ty<'tcx>)> {
+        if !seen.insert(local) {
+            return None;
+        }
+        let ty = self.monomorphize(self.mir.local_decls[local].ty);
+        if let ty::Array(elem, n) = *ty.kind() {
+            let n = self.monomorphize(n).try_to_target_usize(self.cx.tcx())?;
+            if local.index() <= self.mir.arg_count {
+                return None;
+            }
+            return Some((local.into(), n, self.monomorphize(elem)));
+        }
+        for bb in self.mir.basic_blocks.iter() {
+            for stmt in &bb.statements {
+                let mir::StatementKind::Assign(assign) = &stmt.kind else { continue };
+                if assign.0.as_local() != Some(local) {
+                    continue;
+                }
+                match &assign.1 {
+                    Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => {
+                        if let Some(s) = self.store_into_extend_src_op(op, seen) {
+                            return Some(s);
+                        }
+                    }
+                    Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
+                        if let Some(s) = self.store_into_extend_src_place(*p, seen) {
+                            return Some(s);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
     }
 }
 
