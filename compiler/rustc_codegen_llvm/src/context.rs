@@ -173,6 +173,8 @@ pub(crate) struct FullCx<'ll, 'tcx> {
     pub mem_pending_bundle: RefCell<Option<(&'static str, Vec<&'ll Value>)>>,
     /// M5r: `!mem.last_use` loan ids for the next `call`/`invoke` built in this CGU.
     pub mem_pending_last_use: RefCell<Option<Vec<u64>>>,
+    /// M7.1d B3a: string parameter attributes for the next `call`/`invoke`.
+    pub mem_pending_param_attrs: RefCell<Vec<(u32, &'static str)>>,
     /// M7.1a: owner slots moved from. The fact, if any, is kept after the last
     /// full read of the slot. A partial or unknown read retires the slot with
     /// no fact: a fact that would precede a later read is worse than a miss.
@@ -795,6 +797,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
                 objc_class_t: Cell::new(None),
                 mem_pending_bundle: RefCell::new(None),
                 mem_pending_last_use: RefCell::new(None),
+                mem_pending_param_attrs: RefCell::new(Vec::new()),
                 mem_moves: RefCell::new(Vec::new()),
                 mem_call_frames: RefCell::new(Vec::new()),
                 objc_classrefs: Default::default(),

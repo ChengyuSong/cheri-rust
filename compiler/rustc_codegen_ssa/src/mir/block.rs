@@ -256,6 +256,8 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
         );
 
         // M5r: pending `"mem.check"` / `"mem.free"` bundle and `!mem.last_use`.
+        // M7.1d B3a: pending `mem.ffi_borrow` / `mem.ffi_retain` param attrs.
+        fx.mem_ffi_prepare(bx, fn_abi, instance);
         fx.mem_prepare_call(bx, llargs, instance);
 
         if kind == CallKind::Tail {

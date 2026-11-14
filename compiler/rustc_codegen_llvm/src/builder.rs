@@ -527,6 +527,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         if let Some(fn_abi) = fn_abi {
             fn_abi.apply_attrs_callsite(self, invoke);
         }
+        self.apply_pending_param_attrs(invoke);
         if let Some(loans) = mem_last_use {
             self.mem_last_use(invoke, &loans);
         }
@@ -1104,6 +1105,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     fn mem_move_clear(&mut self) {
         self.cx.mem_moves.borrow_mut().clear();
         self.cx.mem_call_frames.borrow_mut().clear();
+    }
+
+    fn mem_pending_param_attr(&mut self, index: u32, name: &'static str) {
+        self.cx.mem_pending_param_attrs.borrow_mut().push((index, name));
     }
 
     fn mem_fact(&mut self, tag: &'static str, ops: &[&'ll Value]) {
@@ -1971,6 +1976,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         if let Some(fn_abi) = fn_abi {
             fn_abi.apply_attrs_callsite(self, call);
         }
+        self.apply_pending_param_attrs(call);
         if let Some(loans) = mem_last_use {
             self.mem_last_use(call, &loans);
         }
@@ -2034,7 +2040,20 @@ impl<'ll> StaticBuilderMethods for Builder<'_, 'll, '_> {
 }
 
 impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
-    pub(crate) fn llfn(&self) -> &'ll Value {
+
+    fn apply_pending_param_attrs(&mut self, callsite: &'ll Value) {
+        let pending = std::mem::take(&mut *self.cx.mem_pending_param_attrs.borrow_mut());
+        for (index, name) in pending {
+            let attr = llvm::CreateAttrString(self.llcx, name);
+            crate::attributes::apply_to_callsite(
+                callsite,
+                llvm::AttributePlace::Argument(index),
+                &[attr],
+            );
+        }
+    }
+
+        pub(crate) fn llfn(&self) -> &'ll Value {
         unsafe { llvm::LLVMGetBasicBlockParent(self.llbb()) }
     }
 
