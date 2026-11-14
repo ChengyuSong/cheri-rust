@@ -4074,6 +4074,10 @@ fn classify_stmt_use<'tcx>(stmt: &mir::Statement<'tcx>, local: mir::Local) -> St
     }
 }
 
+fn wipe_def_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> String {
+    rustc_middle::ty::print::with_no_trimmed_paths!(tcx.def_path_str(def_id))
+}
+
 /// [LLM-generated] M7.2a-w1: recursive monomorphized typic walk. A type may
 /// contain capability bits if some non-ZST field of some variant does, or
 /// if it is a reference, raw pointer, or fn pointer. Integers, floats,
@@ -4201,7 +4205,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         {
             return Some(args.type_at(0));
         }
-        let path = tcx.def_path_str(def.did());
+        let path = wipe_def_path(tcx, def.did());
         if path.ends_with("raw_vec::RawVec") || path.contains("::raw_vec::RawVec") {
             return Some(args.type_at(0));
         }
@@ -4224,7 +4228,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let Some(name) = tcx.opt_item_name(inst.def_id()) else {
             return false;
         };
-        let path = tcx.def_path_str(inst.def_id());
+        let path = wipe_def_path(tcx, inst.def_id());
         if name.as_str() == "deallocate"
             || path.contains("__rust_dealloc")
             || path.ends_with("::__rust_dealloc")
@@ -4243,7 +4247,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let Some(name) = tcx.opt_item_name(inst.def_id()) else {
             return false;
         };
-        let path = tcx.def_path_str(inst.def_id());
+        let path = wipe_def_path(tcx, inst.def_id());
         path.contains("RawVecInner")
             && matches!(
                 name.as_str(),
@@ -4513,7 +4517,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         }
 
-        let path = tcx.def_path_str(self.instance.def_id());
+        let path = wipe_def_path(tcx, self.instance.def_id());
         let is_rawvec = (path.contains("raw_vec::RawVec") || path.contains("raw_vec"))
             && !path.contains("RawVecInner");
         let ptr_len = if is_rawvec || is_shrink_site {
@@ -4531,7 +4535,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 fn is_ptr_or_nonnull<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
     match *ty.kind() {
         ty::Adt(def, _) => {
-            let path = tcx.def_path_str(def.did());
+            let path = wipe_def_path(tcx, def.did());
             path.ends_with("ptr::NonNull")
                 || path.ends_with("ptr::Unique")
                 || path.contains("::non_null::NonNull")
@@ -4547,15 +4551,15 @@ fn is_layout_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
     let ty::Adt(def, _) = *ty.kind() else {
         return false;
     };
-    tcx.def_path_str(def.did()).ends_with("alloc::Layout")
-        || tcx.def_path_str(def.did()).ends_with("alloc::layout::Layout")
+    wipe_def_path(tcx, def.did()).ends_with("alloc::Layout")
+        || wipe_def_path(tcx, def.did()).ends_with("alloc::layout::Layout")
 }
 
 fn peel_nonnull_or_unique<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
     let ty::Adt(def, args) = *ty.kind() else {
         return ty.builtin_deref(true);
     };
-    let path = tcx.def_path_str(def.did());
+    let path = wipe_def_path(tcx, def.did());
     if path.ends_with("ptr::NonNull")
         || path.ends_with("ptr::Unique")
         || path.contains("::non_null::NonNull")
