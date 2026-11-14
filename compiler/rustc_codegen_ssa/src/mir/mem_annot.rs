@@ -60,12 +60,27 @@
 //!   nothing). The B2a r3 emit filter applies (no facts in core/alloc,
 //!   non-local monomorphized fns, or fmt/unwind/panic_impl).
 //!
+//! - `call void @llvm.mem.fact() [ "mem.wipe_cap_words"(ptr, i64 len) ]`
+//!   immediately before the T-aware RawVec / Box / Rc-Arc final dealloc
+//!   call (M7.2a-w1), after element drop, with `len` equal to the returned
+//!   Layout / capacity in bytes. rustc emits only when a recursive
+//!   monomorphized typic walk (`ty_may_contain_caps`) says the element /
+//!   pointee may contain capabilities. Cap-free buffers (`Vec<u8>`,
+//!   `String` body) get no fact. This one fact is allowed in alloc and in
+//!   non-local monomorphs of those drop/dealloc functions; general
+//!   store_into in core/alloc stays filtered. Gated by `-Zcheri-annotate`
+//!   and `-Zcheri-wipe-cap-words` (default on; `no` emits nothing). The
+//!   late CHERI pass lowers the fact to an outlined non-volatile helper
+//!   of ready-address csc-null stores. No memcpy hook, no grow/shrink
+//!   relocate (w2), no allocator `free()` wipe fallback. No ra/sp clears.
+//!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
 //! `cheri_bounds.rs`), except that borrow sites are always matched (flagged in `kind`).
 
 use rustc_abi::{Align, CanonAbi};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_index::IndexVec;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
@@ -518,6 +533,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     pub(crate) fn mem_prepare_call(
         &mut self,
         bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llargs: &[Bx::Value],
         instance: Option<ty::Instance<'tcx>>,
     ) {
@@ -537,6 +553,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             self.mem_stats.last_use_calls += 1;
             bx.set_next_call_mem_last_use(&loans);
         }
+        // M7.2a-w1: emit mem.wipe_cap_words immediately before the dealloc
+        // call (after element drop, in the last-ref / size!=0 branch).
+        self.mem_wipe_cap_words_prepare(bx, fn_abi, llargs, instance);
     }
 
     /// M7.1a: a `Box` / `Vec` (or `Option` of those) was just loaded or aliased by
@@ -4053,6 +4072,498 @@ fn classify_stmt_use<'tcx>(stmt: &mir::Statement<'tcx>, local: mir::Local) -> St
             if m.any { StmtUse::Other } else { StmtUse::None }
         }
     }
+}
+
+/// [LLM-generated] M7.2a-w1: recursive monomorphized typic walk. A type may
+/// contain capability bits if some non-ZST field of some variant does, or
+/// if it is a reference, raw pointer, or fn pointer. Integers, floats,
+/// `bool`, `char`, `str` bytes, and `PhantomData` do not. `MaybeUninit<T>`
+/// is the same as `T`. `dyn` / foreign / unnormalized aliases / unsubst
+/// generics are conservative yes. A `String` *value* contains a cap (the
+/// buffer pointer); the *body* of `String` / `Vec<u8>` being returned is
+/// `T = u8` and is no.
+fn ty_may_contain_caps<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    fn is_zst<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+        tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(ty))
+            .map(|l| l.is_zst())
+            .unwrap_or(false)
+    }
+    fn rec<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, seen: &mut FxHashSet<Ty<'tcx>>) -> bool {
+        let ty = tcx
+            .try_normalize_erasing_regions(
+                ty::TypingEnv::fully_monomorphized(),
+                ty::Unnormalized::new_wip(ty),
+            )
+            .unwrap_or(ty);
+        if !seen.insert(ty) {
+            // Cycle: no additional information from this edge.
+            return false;
+        }
+        match *ty.kind() {
+            ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Never | ty::Str
+            | ty::FnDef(..) => false,
+            ty::Ref(..) | ty::RawPtr(..) | ty::FnPtr(..) => true,
+            ty::Array(elem, _) | ty::Slice(elem) | ty::Pat(elem, _) => rec(tcx, elem, seen),
+            ty::Tuple(ts) => ts.iter().any(|t| rec(tcx, t, seen)),
+            ty::Adt(def, args) => {
+                if def.is_phantom_data() {
+                    return false;
+                }
+                if tcx.is_lang_item(def.did(), LangItem::MaybeUninit) {
+                    return rec(tcx, args.type_at(0), seen);
+                }
+                def.all_fields().any(|f| {
+                    let ft = f.ty(tcx, args).skip_norm_wip();
+                    !is_zst(tcx, ft) && rec(tcx, ft, seen)
+                })
+            }
+            ty::Closure(_, args) => rec(tcx, args.as_closure().tupled_upvars_ty(), seen),
+            ty::Coroutine(_, args) => {
+                let c = args.as_coroutine();
+                rec(tcx, c.tupled_upvars_ty(), seen)
+                    || rec(tcx, c.resume_ty(), seen)
+                    || rec(tcx, c.yield_ty(), seen)
+                    || rec(tcx, c.return_ty(), seen)
+            }
+            ty::CoroutineClosure(_, args) => {
+                rec(tcx, args.as_coroutine_closure().tupled_upvars_ty(), seen)
+            }
+            // dyn, foreign, unsubst generic, infer, alias that did not
+            // normalize, witnesses: conservative yes.
+            ty::Dynamic(..)
+            | ty::Foreign(_)
+            | ty::Param(_)
+            | ty::Placeholder(_)
+            | ty::Infer(_)
+            | ty::Bound(..)
+            | ty::Error(_)
+            | ty::Alias(..)
+            | ty::CoroutineWitness(..)
+            | ty::UnsafeBinder(_) => true,
+        }
+    }
+    let mut seen = FxHashSet::default();
+    rec(tcx, ty, &mut seen)
+}
+
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    /// `-Zcheri-annotate` and `-Zcheri-wipe-cap-words` (default on). This
+    /// fact is allowed in alloc and in non-local monomorphs of the target
+    /// drop/dealloc functions; the B2a core/alloc filter does not apply.
+    fn wipe_cap_words_enabled(&self) -> bool {
+        self.mem_annotate() && self.cx.tcx().sess.opts.unstable_opts.cheri_wipe_cap_words
+    }
+
+    /// Element / pointee type of a T-aware container whose drop or
+    /// shrink-to-0 returns a heap block. `None` if this function is not
+    /// one of those sites.
+    fn wipe_container_elem_ty(&self) -> Option<Ty<'tcx>> {
+        let tcx = self.cx.tcx();
+        let def_id = self.instance.def_id();
+        let Some(name) = tcx.opt_item_name(def_id) else {
+            return None;
+        };
+        let is_drop = name == sym::drop;
+        let is_shrink = matches!(
+            name.as_str(),
+            "shrink_to_fit" | "try_shrink_to_fit" | "shrink" | "shrink_unchecked"
+        );
+        if !is_drop && !is_shrink {
+            return None;
+        }
+        let self_ty = if let Some(impl_did) = tcx.impl_of_assoc(def_id) {
+            tcx.type_of(impl_did).instantiate(tcx, self.instance.args).skip_norm_wip()
+        } else {
+            // Inherent method without an impl DefId (should be rare):
+            // peel `self` from MIR local 0.
+            let local_ty = self.monomorphize(self.mir.local_decls[mir::Local::from_u32(1)].ty);
+            local_ty.builtin_deref(true).unwrap_or(local_ty)
+        };
+        // Peel `&mut Self` only. `builtin_deref` also peels `Box`, which
+        // would lose the container type.
+        let self_ty = match *self_ty.kind() {
+            ty::Ref(_, ty, _) | ty::RawPtr(ty, _) => ty,
+            _ => self_ty,
+        };
+        self.wipe_elem_from_container_ty(self_ty)
+    }
+
+    fn wipe_elem_from_container_ty(&self, self_ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
+        let tcx = self.cx.tcx();
+        let ty::Adt(def, args) = *self_ty.kind() else {
+            return None;
+        };
+        if tcx.lang_items().owned_box() == Some(def.did()) {
+            return Some(args.type_at(0));
+        }
+        if tcx.is_diagnostic_item(sym::RcWeak, def.did())
+            || tcx.is_diagnostic_item(sym::ArcWeak, def.did())
+        {
+            return Some(args.type_at(0));
+        }
+        let path = tcx.def_path_str(def.did());
+        if path.ends_with("raw_vec::RawVec") || path.contains("::raw_vec::RawVec") {
+            return Some(args.type_at(0));
+        }
+        if path.contains("UniqueRc")
+            || path.contains("UniqueArc")
+            || path.ends_with("rc::Weak")
+            || path.ends_with("sync::Weak")
+        {
+            return Some(args.type_at(0));
+        }
+        None
+    }
+
+    fn wipe_is_final_dealloc_callee(&self, inst: Instance<'tcx>) -> bool {
+        let tcx = self.cx.tcx();
+        let flags = tcx.codegen_fn_attrs(inst.def_id()).flags;
+        if flags.contains(CodegenFnAttrFlags::DEALLOCATOR) {
+            return true;
+        }
+        let Some(name) = tcx.opt_item_name(inst.def_id()) else {
+            return false;
+        };
+        let path = tcx.def_path_str(inst.def_id());
+        if name.as_str() == "deallocate"
+            || path.contains("__rust_dealloc")
+            || path.ends_with("::__rust_dealloc")
+        {
+            return true;
+        }
+        // RawVec::drop calls RawVecInner::deallocate (T is known here).
+        if path.contains("RawVecInner") && name.as_str() == "deallocate" {
+            return true;
+        }
+        false
+    }
+
+    fn wipe_is_rawvec_shrink_callee(&self, inst: Instance<'tcx>) -> bool {
+        let tcx = self.cx.tcx();
+        let Some(name) = tcx.opt_item_name(inst.def_id()) else {
+            return false;
+        };
+        let path = tcx.def_path_str(inst.def_id());
+        path.contains("RawVecInner")
+            && matches!(
+                name.as_str(),
+                "shrink" | "shrink_to_fit" | "try_shrink_to_fit" | "shrink_unchecked"
+            )
+    }
+
+    /// New capacity argument of a shrink call, if present as a constant.
+    fn wipe_shrink_new_cap(
+        &self,
+        bx: &Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+    ) -> Option<u64> {
+        // Inner::shrink_to_fit(&mut self, cap: usize, elem_layout: Layout)
+        // Walk args, taking the first usize / isize after `self`.
+        let mut idx = 0usize;
+        for arg in fn_abi.args.iter() {
+            match arg.mode {
+                PassMode::Ignore => continue,
+                PassMode::Pair(_, _) => {
+                    idx += 2;
+                }
+                _ => {
+                    if idx < llargs.len() {
+                        let ty = arg.layout.ty;
+                        if ty.is_integral() && !ty.is_bool() {
+                            return bx.const_to_opt_uint(llargs[idx]);
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        None
+    }
+
+    fn wipe_self_obj_ptr(&self, bx: &mut Bx) -> Option<Bx::Value> {
+        // MIR local 0 is the return place; the `self` argument is local 1.
+        let local = mir::Local::from_u32(1);
+        let local_ty = self.monomorphize(self.mir.local_decls[local].ty);
+        let is_ref = matches!(*local_ty.kind(), ty::Ref(..) | ty::RawPtr(..));
+        let ptr_align = bx.data_layout().pointer_align().abi;
+        match &self.locals[local] {
+            LocalRef::Operand(op) => match op.val {
+                OperandValue::Immediate(v) => Some(v),
+                OperandValue::Pair(a, _) => Some(a),
+                OperandValue::Ref(pv) => Some(pv.llval),
+                OperandValue::ZeroSized => None,
+            },
+            LocalRef::Place(p) => {
+                if is_ref {
+                    Some(bx.load(bx.type_ptr(), p.val.llval, ptr_align))
+                } else {
+                    Some(p.val.llval)
+                }
+            }
+            LocalRef::UnsizedPlace(p) => Some(p.val.llval),
+            LocalRef::PendingOperand => None,
+        }
+    }
+
+    fn wipe_load_rawvec_ptr_len(
+        &mut self,
+        bx: &mut Bx,
+        elem_ty: Ty<'tcx>,
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        let obj = self.wipe_self_obj_ptr(bx)?;
+        let stride = self.cx.layout_of(elem_ty).size.bytes();
+        let local_ty = self.monomorphize(self.mir.local_decls[mir::Local::from_u32(1)].ty);
+        let vec_ty = match *local_ty.kind() {
+            ty::Ref(_, ty, _) | ty::RawPtr(ty, _) => ty,
+            _ => local_ty,
+        };
+        let layout = self.cx.layout_of(vec_ty);
+        if layout.fields.count() < 1 {
+            return None;
+        }
+        // RawVec { inner: RawVecInner { ptr, cap, alloc }, _marker }
+        let inner_off = layout.fields.offset(0).bytes();
+        let inner_layout = layout.field(self.cx, 0);
+        let inner_addr = if inner_off == 0 {
+            obj
+        } else {
+            bx.inbounds_ptradd(obj, bx.const_usize(inner_off))
+        };
+        if inner_layout.fields.count() < 2 {
+            return None;
+        }
+        let ptr_align = bx.data_layout().pointer_align().abi;
+        let buf = bx.load(bx.type_ptr(), inner_addr, ptr_align);
+        let cap_off = inner_layout.fields.offset(1).bytes();
+        let cap_layout = inner_layout.field(self.cx, 1);
+        let cap_addr = if cap_off == 0 {
+            inner_addr
+        } else {
+            bx.inbounds_ptradd(inner_addr, bx.const_usize(cap_off))
+        };
+        let cap = bx.load(bx.type_isize(), cap_addr, cap_layout.align.abi);
+        let len = if stride == 0 {
+            bx.const_usize(0)
+        } else if stride == 1 {
+            cap
+        } else {
+            bx.mul(cap, bx.const_usize(stride))
+        };
+        Some((buf, len))
+    }
+
+    fn wipe_load_box_or_rc_ptr_len(
+        &mut self,
+        bx: &mut Bx,
+        elem_ty: Ty<'tcx>,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        // Prefer the Unique / NonNull at offset 0 of `self`. Extracting
+        // from Allocator::deallocate args is easy to get wrong: the first
+        // pointer is `&self` (the allocator), not the buffer.
+        if let Some(v) = self.wipe_load_box_or_rc_from_self(bx, elem_ty) {
+            return Some(v);
+        }
+        self.wipe_extract_dealloc_ptr_len(bx, fn_abi, llargs)
+    }
+
+    fn wipe_load_box_or_rc_from_self(
+        &mut self,
+        bx: &mut Bx,
+        elem_ty: Ty<'tcx>,
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        let obj = self.wipe_self_obj_ptr(bx)?;
+        let local_ty = self.monomorphize(self.mir.local_decls[mir::Local::from_u32(1)].ty);
+        let self_ty = match *local_ty.kind() {
+            ty::Ref(_, ty, _) | ty::RawPtr(ty, _) => ty,
+            _ => local_ty,
+        };
+        let layout = self.cx.layout_of(self_ty);
+        if layout.fields.count() < 1 {
+            return None;
+        }
+        let ptr_align = bx.data_layout().pointer_align().abi;
+        let ptr_off = layout.fields.offset(0).bytes();
+        let ptr_addr = if ptr_off == 0 {
+            obj
+        } else {
+            bx.inbounds_ptradd(obj, bx.const_usize(ptr_off))
+        };
+        let buf = bx.load(bx.type_ptr(), ptr_addr, ptr_align);
+        let ptr_ty = layout.field(self.cx, 0).ty;
+        let pointee = peel_nonnull_or_unique(self.cx.tcx(), ptr_ty).unwrap_or(elem_ty);
+        if !pointee.is_sized(self.cx.tcx(), bx.typing_env()) {
+            return None;
+        }
+        let bytes = self.cx.layout_of(pointee).size.bytes();
+        Some((buf, bx.const_usize(bytes)))
+    }
+
+    fn wipe_extract_dealloc_ptr_len(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        let tcx = self.cx.tcx();
+        let mut idx = 0usize;
+        let mut ptr: Option<Bx::Value> = None;
+        let mut len: Option<Bx::Value> = None;
+        for arg in fn_abi.args.iter() {
+            match arg.mode {
+                PassMode::Ignore => continue,
+                PassMode::Pair(_, _) => {
+                    // Layout often lowers to (size, align). The first
+                    // element of the last such pair is the size.
+                    if idx < llargs.len() {
+                        len = Some(llargs[idx]);
+                    }
+                    idx += 2;
+                }
+                _ => {
+                    if idx >= llargs.len() {
+                        break;
+                    }
+                    let ty = arg.layout.ty;
+                    if is_ptr_or_nonnull(tcx, ty) {
+                        // Allocator::deallocate(&self, ptr, layout): the
+                        // first pointer is the allocator; keep the last.
+                        ptr = Some(llargs[idx]);
+                    } else if is_layout_ty(tcx, ty) {
+                        // Layout passed as a struct: load field 0 (size)
+                        // if indirect; otherwise the value may already be
+                        // a scalar or aggregate. Prefer a GEP+load of
+                        // size at offset 0 through a pointer, else use
+                        // extract if we can treat it as an integer.
+                        if ty.is_integral() {
+                            len = Some(llargs[idx]);
+                        } else {
+                            // Indirect or by-value aggregate: address the
+                            // first field if this is a pointer to Layout,
+                            // otherwise try loading from a slot we do not
+                            // have. Fall back: skip and hope for a pair.
+                            let size_ty_sz = self.cx.layout_of(ty);
+                            if size_ty_sz.fields.count() >= 1 {
+                                // If the ABI passed a pointer to Layout,
+                                // llargs[idx] is that pointer.
+                                if matches!(arg.mode, PassMode::Indirect { .. }) {
+                                    let align = size_ty_sz.field(self.cx, 0).align.abi;
+                                    let size = bx.load(bx.type_isize(), llargs[idx], align);
+                                    len = Some(size);
+                                }
+                            }
+                        }
+                    } else if ty.is_integral() && !ty.is_bool() && ptr.is_some() && len.is_none()
+                    {
+                        // __rust_dealloc(ptr, size, align)
+                        len = Some(llargs[idx]);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        match (ptr, len) {
+            (Some(p), Some(n)) => Some((p, n)),
+            _ => None,
+        }
+    }
+
+    fn mem_wipe_cap_words_prepare(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+        instance: Option<Instance<'tcx>>,
+    ) {
+        if !self.wipe_cap_words_enabled() {
+            return;
+        }
+        let Some(elem_ty) = self.wipe_container_elem_ty() else {
+            return;
+        };
+        if !ty_may_contain_caps(self.cx.tcx(), elem_ty) {
+            return;
+        }
+        let Some(inst) = instance else {
+            return;
+        };
+        let tcx = self.cx.tcx();
+        let self_name = tcx.opt_item_name(self.instance.def_id());
+        let is_shrink_site = self_name.is_some_and(|s| {
+            matches!(
+                s.as_str(),
+                "shrink_to_fit" | "try_shrink_to_fit" | "shrink" | "shrink_unchecked"
+            )
+        });
+        if is_shrink_site {
+            if !self.wipe_is_rawvec_shrink_callee(inst) && !self.wipe_is_final_dealloc_callee(inst)
+            {
+                return;
+            }
+            // Only wipe when shrinking all the way to zero (returning the
+            // block). A non-zero shrink keeps the buffer (w2). A
+            // non-constant cap is left for w2 rather than inserting a
+            // runtime branch here.
+            if self.wipe_shrink_new_cap(bx, fn_abi, llargs) != Some(0) {
+                return;
+            }
+        } else if !self.wipe_is_final_dealloc_callee(inst) {
+            return;
+        }
+
+        let path = tcx.def_path_str(self.instance.def_id());
+        let is_rawvec = (path.contains("raw_vec::RawVec") || path.contains("raw_vec"))
+            && !path.contains("RawVecInner");
+        let ptr_len = if is_rawvec || is_shrink_site {
+            self.wipe_load_rawvec_ptr_len(bx, elem_ty)
+        } else {
+            self.wipe_load_box_or_rc_ptr_len(bx, elem_ty, fn_abi, llargs)
+        };
+        let Some((ptr, len)) = ptr_len else {
+            return;
+        };
+        bx.mem_fact("mem.wipe_cap_words", &[ptr, len]);
+    }
+}
+
+fn is_ptr_or_nonnull<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    match *ty.kind() {
+        ty::Adt(def, _) => {
+            let path = tcx.def_path_str(def.did());
+            path.ends_with("ptr::NonNull")
+                || path.ends_with("ptr::Unique")
+                || path.contains("::non_null::NonNull")
+                || path.contains("::unique::Unique")
+        }
+        // A bare `&A` is the allocator `self`, not the buffer.
+        ty::Ref(..) | ty::RawPtr(..) => false,
+        _ => false,
+    }
+}
+
+fn is_layout_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    let ty::Adt(def, _) = *ty.kind() else {
+        return false;
+    };
+    tcx.def_path_str(def.did()).ends_with("alloc::Layout")
+        || tcx.def_path_str(def.did()).ends_with("alloc::layout::Layout")
+}
+
+fn peel_nonnull_or_unique<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
+    let ty::Adt(def, args) = *ty.kind() else {
+        return ty.builtin_deref(true);
+    };
+    let path = tcx.def_path_str(def.did());
+    if path.ends_with("ptr::NonNull")
+        || path.ends_with("ptr::Unique")
+        || path.contains("::non_null::NonNull")
+        || path.contains("::unique::Unique")
+    {
+        return Some(args.type_at(0));
+    }
+    ty.builtin_deref(true)
 }
 
 fn op_ok<'tcx>(
