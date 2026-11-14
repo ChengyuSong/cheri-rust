@@ -366,6 +366,10 @@ pub trait BuilderMethods<'a, 'tcx>:
 
     /// `call void @llvm.mem.fact() [ "<tag>"(ops) ]`.
     fn mem_fact(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
+    /// [LLM-generated] M7.1d B3a: attach a string parameter attribute
+    /// (`mem.ffi_borrow` / `mem.ffi_retain`) to argument `index` of the
+    /// next `call` / `invoke`.
+    fn mem_pending_param_attr(&mut self, _index: u32, _name: &'static str) {}
 
     /// Remember that `slot` (`bytes` wide) was the source of an owner move and
     /// still holds the value. No fact is emitted yet.

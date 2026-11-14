@@ -47,19 +47,36 @@
 //!   *after* the fact. Facts are never emitted in core/alloc or in non-local
 //!   monomorphized functions.
 //!
+//! - `"mem.ffi_borrow"` / `"mem.ffi_retain"` parameter attributes on
+//!   data-capability arguments of `extern "C"` calls (M7.1d B3a). rustc
+//!   decides borrow vs retain; the late CHERI pass drops Global
+//!   (`candperm` of `~CHERI_PERM_GLOBAL`) on borrow arguments only.
+//!   Default is borrow. Retain is automatic at `into_raw` and is implied
+//!   by skipping allocator lang items and the memcpy family. Overrides:
+//!   `#[cheri::ffi_retain]` / `#[cheri::ffi_borrow]` on the extern fn or
+//!   its extern block. Function-pointer arguments are not marked. Same-DSO
+//!   `no_mangle extern "C"` is treated as a C boundary. Gated by
+//!   `-Zcheri-annotate` and `-Zcheri-ffi-narrow` (default on; `no` emits
+//!   nothing). The B2a r3 emit filter applies (no facts in core/alloc,
+//!   non-local monomorphized fns, or fmt/unwind/panic_impl).
+//!
 //! The MIR analysis of `a[i]` sites (`find_access`, `match_index`, the M2 raw-length and
 //! trusted-allocation rules) is carried over unchanged from M1/M2 (`local/m5`
 //! `cheri_bounds.rs`), except that borrow sites are always matched (flagged in `kind`).
 
-use rustc_abi::Align;
+use rustc_abi::{Align, CanonAbi};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_hir::def::DefKind;
 use rustc_index::IndexVec;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{self, AssertKind, BasicBlock, Operand, PlaceElem, Rvalue, StatementKind};
 use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf};
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
-use rustc_target::callconv::FnAbi;
+use rustc_middle::ty::{self, Instance, Ty, TyCtxt, TypeVisitableExt};
+use rustc_span::def_id::DefId;
+use rustc_span::{sym, Symbol};
+use rustc_target::callconv::{FnAbi, PassMode};
 
 use super::operand::{OperandRef, OperandValue};
 use super::{FunctionCx, LocalRef};
@@ -3097,8 +3114,252 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return true;
         };
         let trait_id = trait_ref.skip_binder().def_id;
+
         !tcx.is_diagnostic_item(rustc_span::sym::Debug, trait_id)
             && !tcx.is_diagnostic_item(rustc_span::sym::Display, trait_id)
+    }
+
+    /// [LLM-generated] M7.1d B3a: emit borrow/retain facts on data-cap
+    /// arguments of an `extern "C"` call. The late pass inserts candperm.
+    pub(crate) fn mem_ffi_prepare(&mut self, bx: &mut Bx, fn_abi: &FnAbi<'tcx, Ty<'tcx>>, instance: Option<Instance<'tcx>>) {
+        if !self.ffi_narrow_enabled() {
+            return;
+        }
+        if fn_abi.conv != CanonAbi::C {
+            return;
+        }
+        if let Some(inst) = instance {
+            if self.ffi_callee_excluded(inst) {
+                return;
+            }
+        }
+        let override_borrow = instance.map(|i| self.ffi_item_has_attr(i.def_id(), sym::ffi_borrow)).unwrap_or(false);
+        let override_retain = instance.map(|i| self.ffi_item_has_attr(i.def_id(), sym::ffi_retain)).unwrap_or(false);
+        let sret = if fn_abi.ret.is_indirect() { 1u32 } else { 0 };
+        let mut llvm_i = sret;
+        for (mir_i, arg) in fn_abi.args.iter().enumerate() {
+            let Some((width, cap_off)) = Self::ffi_llvm_arg_span(&arg.mode) else {
+                return;
+            };
+            if let Some(off) = cap_off {
+                let ty = self.monomorphize(arg.layout.ty);
+                if self.is_store_into_cap_ty(ty) {
+                    let from_into_raw = self.mem_store_into_args.get(mir_i)
+                        .is_some_and(|op| self.operand_from_into_raw(op, &mut Default::default()));
+                    let retain = if override_borrow {
+                        false
+                    } else if override_retain || from_into_raw {
+                        true
+                    } else {
+                        false
+                    };
+                    let tag = if retain { "mem.ffi_retain" } else { "mem.ffi_borrow" };
+                    bx.mem_pending_param_attr(llvm_i + off, tag);
+                }
+            }
+            llvm_i += width;
+        }
+    }
+
+    fn ffi_narrow_enabled(&self) -> bool {
+        if !self.mem_annotate() || !self.cx.tcx().sess.opts.unstable_opts.cheri_ffi_narrow {
+            return false;
+        }
+        let tcx = self.cx.tcx();
+        let name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
+        if matches!(name.as_str(), "core" | "alloc" | "compiler_builtins") {
+            return false;
+        }
+        self.store_into_fn_ok()
+    }
+
+    fn ffi_callee_excluded(&self, inst: Instance<'tcx>) -> bool {
+        let tcx = self.cx.tcx();
+        let def_id = inst.def_id();
+        if tcx.def_kind(def_id).has_codegen_attrs() {
+            let flags = tcx.codegen_instance_attrs(inst.def).flags;
+            if flags.intersects(
+                CodegenFnAttrFlags::ALLOCATOR
+                    | CodegenFnAttrFlags::DEALLOCATOR
+                    | CodegenFnAttrFlags::REALLOCATOR
+                    | CodegenFnAttrFlags::ALLOCATOR_ZEROED,
+            ) {
+                return true;
+            }
+        }
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(tcx.def_path_str(def_id));
+        let name = s.rsplit("::").next().unwrap_or("");
+        matches!(
+            name,
+            "memcpy"
+                | "memmove"
+                | "memset"
+                | "bcopy"
+                | "bzero"
+                | "__memcpy"
+                | "__memmove"
+                | "__memset"
+                | "__memcpy_chk"
+                | "__memmove_chk"
+                | "__memset_chk"
+        )
+    }
+
+    fn ffi_item_has_attr(&self, def_id: DefId, name: Symbol) -> bool {
+        let tcx = self.cx.tcx();
+        let path = [sym::cheri, name];
+        if tcx.get_attrs_by_path(def_id, &path).next().is_some() {
+            return true;
+        }
+        if let Some(parent) = tcx.opt_parent(def_id)
+            && tcx.def_kind(parent) == DefKind::ForeignMod
+            && tcx.get_attrs_by_path(parent, &path).next().is_some()
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Width of this ABI mode in LLVM call arguments, and the offset of a
+    /// by-value data-cap operand if this mode can carry one. `None` width
+    /// means the layout is too unusual to index safely: emit no facts on
+    /// this call.
+    fn ffi_llvm_arg_span(mode: &PassMode) -> Option<(u32, Option<u32>)> {
+        match mode {
+            PassMode::Ignore => Some((0, None)),
+            PassMode::Direct(_) => Some((1, Some(0))),
+            PassMode::Pair(..) => Some((2, Some(0))),
+            PassMode::Indirect { meta_attrs: Some(_), .. } => Some((2, None)),
+            PassMode::Indirect { meta_attrs: None, .. } => Some((1, None)),
+            PassMode::Cast { pad_i32_count, .. } => {
+                // pad undefs plus one scratch / register group. Do not
+                // treat the scratch pointer as a cap value (B3b).
+                Some((u32::from(*pad_i32_count) + 1, None))
+            }
+        }
+    }
+
+    fn operand_from_into_raw(&self, op: &mir::Operand<'tcx>, seen: &mut FxHashSet<mir::Local>) -> bool {
+        match op {
+            // Inlined `Box::into_raw` / `ManuallyDrop` leaves a `move` of
+            // field 0 (`Unique`) of the `Box`. A borrow is a `copy` of the
+            // same field and must not be treated as retain.
+            mir::Operand::Move(p) if self.place_is_inlined_into_raw_move(*p) => true,
+            mir::Operand::Copy(p) | mir::Operand::Move(p) => self.place_from_into_raw(*p, seen),
+            mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => false,
+        }
+    }
+
+    /// True when `place` is field 0 of a `Box`, `Unique`, or `ManuallyDrop` of
+    /// those (the residual MIR of an inlined `into_raw`).
+    fn place_is_inlined_into_raw_move(&self, place: mir::Place<'tcx>) -> bool {
+        let tcx = self.cx.tcx();
+        let mut ty = self.monomorphize(self.mir.local_decls[place.local].ty);
+        for elem in place.projection.iter() {
+            match elem {
+                mir::ProjectionElem::Deref => match ty.builtin_deref(true) {
+                    Some(inner) => ty = self.monomorphize(inner),
+                    None => return false,
+                },
+                mir::ProjectionElem::Field(f, _) => {
+                    if f.index() == 0 && self.ty_is_into_raw_container(ty) {
+                        return true;
+                    }
+                    ty = match ty.kind() {
+                        ty::Adt(def, args) => def
+                            .all_fields()
+                            .nth(f.index())
+                            .map(|fd| fd.ty(tcx, args).skip_norm_wip())
+                            .unwrap_or(ty),
+                        ty::Tuple(ts) => ts.get(f.index()).copied().unwrap_or(ty),
+                        _ => return false,
+                    };
+                    ty = self.monomorphize(ty);
+                }
+                mir::ProjectionElem::Downcast(_, _)
+                | mir::ProjectionElem::UnwrapUnsafeBinder(_) => {}
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn ty_is_into_raw_container(&self, ty: Ty<'tcx>) -> bool {
+        if ty.is_box() {
+            return true;
+        }
+        let ty::Adt(def, args) = *ty.kind() else { return false };
+        let tcx = self.cx.tcx();
+        if tcx.is_lang_item(def.did(), rustc_hir::attrs::lang_items::LangItem::ManuallyDrop) {
+            return args
+                .types()
+                .next()
+                .is_some_and(|inner| self.ty_is_into_raw_container(self.monomorphize(inner)));
+        }
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(tcx.def_path_str(def.did()));
+        s.ends_with("ptr::Unique")
+    }
+
+    fn place_from_into_raw(&self, place: mir::Place<'tcx>, seen: &mut FxHashSet<mir::Local>) -> bool {
+        if !seen.insert(place.local) {
+            return false;
+        }
+        if place.projection.iter().any(|e| {
+            matches!(
+                e,
+                mir::ProjectionElem::Field(..)
+                    | mir::ProjectionElem::Index(_)
+                    | mir::ProjectionElem::ConstantIndex { .. }
+                    | mir::ProjectionElem::Subslice { .. }
+            )
+        }) {
+            // A field/element of an into_raw result is not itself the hand-off.
+            // Still allow Deref / Downcast / Unwrap / Subtype wrappers.
+        }
+        self.ssa_from_into_raw(place.local, seen)
+    }
+
+    fn ssa_from_into_raw(&self, local: mir::Local, seen: &mut FxHashSet<mir::Local>) -> bool {
+        if local == mir::RETURN_PLACE {
+            return false;
+        }
+        for bb in self.mir.basic_blocks.iter() {
+            if let Some(term) = &bb.terminator
+                && let mir::TerminatorKind::Call { func, destination, .. } = &term.kind
+                && destination.local == local
+                && destination.projection.is_empty()
+                && self.func_is_into_raw(func)
+            {
+                return true;
+            }
+            for stmt in &bb.statements {
+                if let StatementKind::Assign(assign) = &stmt.kind
+                    && assign.0.local == local
+                    && assign.0.projection.is_empty()
+                {
+                    if self.rvalue_from_into_raw(&assign.1, seen) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn rvalue_from_into_raw(&self, rvalue: &Rvalue<'tcx>, seen: &mut FxHashSet<mir::Local>) -> bool {
+        match rvalue {
+            Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => self.operand_from_into_raw(op, seen),
+            Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => self.place_from_into_raw(*p, seen),
+            _ => false,
+        }
+    }
+
+    fn func_is_into_raw(&self, func: &mir::Operand<'tcx>) -> bool {
+        let mir::Operand::Constant(c) = func else { return false };
+        let ty::FnDef(def_id, _) = *c.const_.ty().kind() else { return false };
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(self.cx.tcx().def_path_str(def_id));
+        let name = s.rsplit("::").next().unwrap_or("");
+        name == "into_raw"
     }
 
     /// M7.1d B2a: after a store of a capability into a nameable local dest,
