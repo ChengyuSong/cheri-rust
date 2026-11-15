@@ -8,7 +8,15 @@ use core::marker::{Destruct, PhantomData};
 use core::mem::{Alignment, ManuallyDrop, MaybeUninit, SizedTypeProperties};
 use core::panic::UnwindSafe;
 use core::ptr::{self, NonNull};
-use core::{cmp, hint};
+use core::{cmp, hint, intrinsics};
+
+/// M7.2a-w2 [LLM-generated]: typic wipe predicate. rustc lowers this to a
+/// constant; cap-free `T` and flag-off are `false` so we keep `alloc.grow`.
+#[inline(always)]
+const fn typic_wipe_t<T: ?Sized>() -> bool {
+    // SAFETY: rustc lowers this to a constant; the fallback body is `false`.
+    unsafe { intrinsics::cheri_ty_may_contain_caps::<T>() }
+}
 
 #[cfg(not(no_global_oom_handling))]
 use crate::alloc::handle_alloc_error;
@@ -194,8 +202,70 @@ const impl<T, A: [const] Allocator + [const] Destruct> RawVec<T, A> {
     #[cfg(not(no_global_oom_handling))]
     #[inline(never)]
     pub(crate) fn grow_one(&mut self) {
-        // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
-        unsafe { self.inner.grow_one(T::LAYOUT) }
+        if typic_wipe_t::<T>() {
+            // typic T: explicit alloc+copy+wipe-old+dealloc-old (never
+            // wipe before an in-place grow; we do not call alloc.grow).
+            // SAFETY: same cap/layout contract as Inner::grow_one.
+            if let Err(err) = unsafe { self.grow_amortized_wipe(self.inner.cap.as_inner(), 1) } {
+                handle_error(err);
+            }
+        } else {
+            // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
+            unsafe { self.inner.grow_one(T::LAYOUT) }
+        }
+    }
+
+    // typic grow helpers live in this const impl so `grow_one` can call them.
+    #[cfg(not(no_global_oom_handling))]
+    unsafe fn grow_amortized_wipe(
+        &mut self,
+        len: usize,
+        additional: usize,
+    ) -> Result<(), TryReserveError> {
+        debug_assert!(additional > 0);
+        if T::LAYOUT.size() == 0 {
+            return Err(CapacityOverflow.into());
+        }
+        let required_cap = len.checked_add(additional).ok_or(CapacityOverflow)?;
+        let cap = cmp::max(self.inner.cap.as_inner() * 2, required_cap);
+        let cap = cmp::max(min_non_zero_cap(T::LAYOUT.size()), cap);
+        let ptr = unsafe { self.finish_grow_wipe(cap)? };
+        unsafe { self.inner.set_ptr_and_cap(ptr, cap) };
+        Ok(())
+    }
+
+    unsafe fn grow_exact_wipe(
+        &mut self,
+        len: usize,
+        additional: usize,
+    ) -> Result<(), TryReserveError> {
+        if T::LAYOUT.size() == 0 {
+            return Err(CapacityOverflow.into());
+        }
+        let cap = len.checked_add(additional).ok_or(CapacityOverflow)?;
+        let ptr = unsafe { self.finish_grow_wipe(cap)? };
+        unsafe { self.inner.set_ptr_and_cap(ptr, cap) };
+        Ok(())
+    }
+
+    // M7.2a-w3 [LLM-generated]: typic wrapper stays T-aware so rustc can
+    // plant mem.wipe_cap_words on the old-block dealloc. The allocate+copy
+    // body is the type-erased RawVecInner helper (one copy per allocator,
+    // not per T) to cut the w2 monomorph .text bloat.
+    unsafe fn finish_grow_wipe(&self, cap: usize) -> Result<NonNull<[u8]>, TryReserveError> {
+        let elem_layout = T::LAYOUT;
+        let new_layout = layout_array(cap, elem_layout)?;
+        if let Some((ptr, old_layout)) = unsafe { self.inner.current_memory(elem_layout) } {
+            debug_assert!(old_layout.align() == new_layout.align());
+            unsafe { hint::assert_unchecked(old_layout.align() == new_layout.align()) };
+            let new_ptr = unsafe {
+                self.inner.alloc_copy_for_wipe(new_layout, Some(ptr), old_layout.size())?
+            };
+            unsafe { self.inner.alloc.deallocate(ptr, old_layout) };
+            Ok(new_ptr)
+        } else {
+            unsafe { self.inner.alloc_copy_for_wipe(new_layout, None, 0) }
+        }
     }
 }
 
@@ -354,8 +424,14 @@ impl<T, A: Allocator> RawVec<T, A> {
     #[cfg(not(no_global_oom_handling))]
     #[inline]
     pub(crate) fn reserve(&mut self, len: usize, additional: usize) {
-        // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
-        unsafe { self.inner.reserve(len, additional, T::LAYOUT) }
+        if typic_wipe_t::<T>() {
+            if let Err(err) = unsafe { self.try_reserve_wipe(len, additional) } {
+                handle_error(err);
+            }
+        } else {
+            // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
+            unsafe { self.inner.reserve(len, additional, T::LAYOUT) }
+        }
     }
 
     /// The same as `reserve`, but returns on errors instead of panicking or aborting.
@@ -364,8 +440,12 @@ impl<T, A: Allocator> RawVec<T, A> {
         len: usize,
         additional: usize,
     ) -> Result<(), TryReserveError> {
-        // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
-        unsafe { self.inner.try_reserve(len, additional, T::LAYOUT) }
+        if typic_wipe_t::<T>() {
+            unsafe { self.try_reserve_wipe(len, additional) }
+        } else {
+            // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
+            unsafe { self.inner.try_reserve(len, additional, T::LAYOUT) }
+        }
     }
 
     /// Ensures that the buffer contains at least enough space to hold `len +
@@ -387,8 +467,14 @@ impl<T, A: Allocator> RawVec<T, A> {
     /// Aborts on OOM.
     #[cfg(not(no_global_oom_handling))]
     pub(crate) fn reserve_exact(&mut self, len: usize, additional: usize) {
-        // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
-        unsafe { self.inner.reserve_exact(len, additional, T::LAYOUT) }
+        if typic_wipe_t::<T>() {
+            if let Err(err) = unsafe { self.try_reserve_exact_wipe(len, additional) } {
+                handle_error(err);
+            }
+        } else {
+            // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
+            unsafe { self.inner.reserve_exact(len, additional, T::LAYOUT) }
+        }
     }
 
     /// The same as `reserve_exact`, but returns on errors instead of panicking or aborting.
@@ -397,8 +483,12 @@ impl<T, A: Allocator> RawVec<T, A> {
         len: usize,
         additional: usize,
     ) -> Result<(), TryReserveError> {
-        // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
-        unsafe { self.inner.try_reserve_exact(len, additional, T::LAYOUT) }
+        if typic_wipe_t::<T>() {
+            unsafe { self.try_reserve_exact_wipe(len, additional) }
+        } else {
+            // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
+            unsafe { self.inner.try_reserve_exact(len, additional, T::LAYOUT) }
+        }
     }
 
     /// Shrinks the buffer down to the specified capacity. If the given amount
@@ -414,8 +504,14 @@ impl<T, A: Allocator> RawVec<T, A> {
     #[cfg(not(no_global_oom_handling))]
     #[inline]
     pub(crate) fn shrink_to_fit(&mut self, cap: usize) {
-        // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
-        unsafe { self.inner.shrink_to_fit(cap, T::LAYOUT) }
+        if typic_wipe_t::<T>() {
+            if let Err(err) = unsafe { self.shrink_wipe(cap) } {
+                handle_error(err);
+            }
+        } else {
+            // SAFETY: All calls on self.inner pass T::LAYOUT as the elem_layout
+            unsafe { self.inner.shrink_to_fit(cap, T::LAYOUT) }
+        }
     }
 
     /// Shrinks the buffer down to the specified capacity. If the given amount
@@ -430,8 +526,82 @@ impl<T, A: Allocator> RawVec<T, A> {
     /// Panics if the given amount is *larger* than the current capacity.
     #[inline]
     pub(crate) fn try_shrink_to_fit(&mut self, cap: usize) -> Result<(), TryReserveError> {
-        // SAFETY: Layout is valid for T.
-        unsafe { self.inner.try_shrink_to_fit(cap, T::LAYOUT) }
+        if typic_wipe_t::<T>() {
+            // SAFETY: Layout is valid for T.
+            unsafe { self.shrink_wipe(cap) }
+        } else {
+            // SAFETY: Layout is valid for T.
+            unsafe { self.inner.try_shrink_to_fit(cap, T::LAYOUT) }
+        }
+    }
+
+    // M7.2a-w2 [LLM-generated]: typic-T grow/shrink that never calls
+    // Allocator::grow / shrink (those deallocate the old block after the
+    // type is erased). After a cap-preserving copy, the old block is
+    // deallocated here so rustc can plant mem.wipe_cap_words on typic T.
+    // In-place grow is not attempted (this is the explicit relocate path).
+
+    unsafe fn try_reserve_wipe(
+        &mut self,
+        len: usize,
+        additional: usize,
+    ) -> Result<(), TryReserveError> {
+        if self.inner.needs_to_grow(len, additional, T::LAYOUT) {
+            unsafe { self.grow_amortized_wipe(len, additional)? }
+        }
+        unsafe {
+            hint::assert_unchecked(!self.inner.needs_to_grow(len, additional, T::LAYOUT));
+        }
+        Ok(())
+    }
+
+    unsafe fn try_reserve_exact_wipe(
+        &mut self,
+        len: usize,
+        additional: usize,
+    ) -> Result<(), TryReserveError> {
+        if self.inner.needs_to_grow(len, additional, T::LAYOUT) {
+            unsafe { self.grow_exact_wipe(len, additional)? }
+        }
+        unsafe {
+            hint::assert_unchecked(!self.inner.needs_to_grow(len, additional, T::LAYOUT));
+        }
+        Ok(())
+    }
+
+    /// typic-T shrink: wipe+dealloc on shrink-to-0 (including non-const);
+    /// on a non-zero shrink, explicit alloc+copy+wipe-old+dealloc-old so a
+    /// relocated (or size-class-returned) old buffer cannot go back tagged.
+    /// Does not wipe a still-live in-place buffer (we do not call alloc.shrink).
+    unsafe fn shrink_wipe(&mut self, cap: usize) -> Result<(), TryReserveError> {
+        assert!(
+            cap <= self.capacity(),
+            "Tried to shrink to a larger capacity"
+        );
+        let elem_layout = T::LAYOUT;
+        let Some((ptr, layout)) = (unsafe { self.inner.current_memory(elem_layout) }) else {
+            return Ok(());
+        };
+        if cap == 0 {
+            unsafe { self.inner.alloc.deallocate(ptr, layout) };
+            self.inner.ptr =
+                NonNull::without_provenance(elem_layout.alignment().as_nonzero_usize());
+            self.inner.cap = ZERO_CAP;
+            return Ok(());
+        }
+        let (new_size, new_layout) = unsafe {
+            let new_size = elem_layout.size().unchecked_mul(cap);
+            let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+            (new_size, new_layout)
+        };
+        // Shared type-erased allocate+copy; typic wrapper deallocates so
+        // rustc can plant the wipe fact (T is known here).
+        let new_ptr = unsafe { self.inner.alloc_copy_for_wipe(new_layout, Some(ptr), new_size)? };
+        unsafe {
+            self.inner.alloc.deallocate(ptr, layout);
+            self.inner.set_ptr_and_cap(new_ptr, cap);
+        }
+        Ok(())
     }
 }
 
@@ -584,6 +754,33 @@ const impl<A: [const] Allocator + [const] Destruct> RawVecInner<A> {
         };
 
         memory.map_err(const |_| AllocError { layout: new_layout, non_exhaustive: () }.into())
+    }
+
+    /// M7.2a-w3 [LLM-generated]: type-erased typic relocate. Allocate
+    /// `new_layout` and copy `copy_len` bytes from `old_ptr` (if any).
+    /// The typic RawVec<T> wrapper deallocates the old block so rustc can
+    /// plant mem.wipe_cap_words. Marked `cold` (like `finish_grow`, not
+    /// `inline(never)`) so typic T share one body while LLVM may still
+    /// inline a hot relocate. `copy_len` must fit in `new_layout` and,
+    /// when `old_ptr` is `Some`, in the old allocation.
+    #[cold]
+    unsafe fn alloc_copy_for_wipe(
+        &self,
+        new_layout: Layout,
+        old_ptr: Option<NonNull<u8>>,
+        copy_len: usize,
+    ) -> Result<NonNull<[u8]>, TryReserveError> {
+        let new_ptr = self.alloc.allocate(new_layout).map_err(
+            const |_| -> TryReserveError {
+                AllocError { layout: new_layout, non_exhaustive: () }.into()
+            },
+        )?;
+        if let Some(src) = old_ptr {
+            unsafe {
+                ptr::copy_nonoverlapping(src.as_ptr(), new_ptr.as_mut_ptr(), copy_len);
+            }
+        }
+        Ok(new_ptr)
     }
 }
 

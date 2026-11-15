@@ -2454,6 +2454,8 @@ options! {
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B3a: emit `mem.ffi_borrow` / `mem.ffi_retain` parameter          attributes on data-capability arguments of `extern \"C\"` calls, for the late          LLVM CHERI pass to drop Global on borrow args (default: yes; `no` emits nothing;          CHERI targets only, also requires `-Zcheri-annotate`)"),
+    cheri_wipe_cap_words: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2a-w1: emit `mem.wipe_cap_words`(ptr, len) facts at          T-aware RawVec / Box / Rc-Arc final dealloc (after element drop, before          deallocate, length is the returned Layout / capacity), for the late LLVM          CHERI pass to store cnull in each cap-sized word of a cap-containing          buffer (default: yes; `no` emits nothing and is byte-identical to          f75828ba; CHERI targets only, also requires `-Zcheri-annotate`).          Allowed in alloc and in non-local monomorphs of those drop/dealloc          functions only; does not re-enable general store_into in core/alloc"),
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),
