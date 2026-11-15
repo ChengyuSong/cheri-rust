@@ -248,28 +248,23 @@ const impl<T, A: [const] Allocator + [const] Destruct> RawVec<T, A> {
         Ok(())
     }
 
+    // M7.2a-w3 [LLM-generated]: typic wrapper stays T-aware so rustc can
+    // plant mem.wipe_cap_words on the old-block dealloc. The allocate+copy
+    // body is the type-erased RawVecInner helper (one copy per allocator,
+    // not per T) to cut the w2 monomorph .text bloat.
     unsafe fn finish_grow_wipe(&self, cap: usize) -> Result<NonNull<[u8]>, TryReserveError> {
         let elem_layout = T::LAYOUT;
         let new_layout = layout_array(cap, elem_layout)?;
         if let Some((ptr, old_layout)) = unsafe { self.inner.current_memory(elem_layout) } {
             debug_assert!(old_layout.align() == new_layout.align());
             unsafe { hint::assert_unchecked(old_layout.align() == new_layout.align()) };
-            let new_ptr = self.inner.alloc.allocate(new_layout).map_err(
-                const |_| -> TryReserveError {
-                    AllocError { layout: new_layout, non_exhaustive: () }.into()
-                },
-            )?;
-            unsafe {
-                ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
-                self.inner.alloc.deallocate(ptr, old_layout);
-            }
+            let new_ptr = unsafe {
+                self.inner.alloc_copy_for_wipe(new_layout, Some(ptr), old_layout.size())?
+            };
+            unsafe { self.inner.alloc.deallocate(ptr, old_layout) };
             Ok(new_ptr)
         } else {
-            self.inner.alloc.allocate(new_layout).map_err(
-                const |_| -> TryReserveError {
-                    AllocError { layout: new_layout, non_exhaustive: () }.into()
-                },
-            )
+            unsafe { self.inner.alloc_copy_for_wipe(new_layout, None, 0) }
         }
     }
 }
@@ -599,11 +594,10 @@ impl<T, A: Allocator> RawVec<T, A> {
             let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
             (new_size, new_layout)
         };
-        let new_ptr = self.inner.alloc.allocate(new_layout).map_err(|_| -> TryReserveError {
-            AllocError { layout: new_layout, non_exhaustive: () }.into()
-        })?;
+        // Shared type-erased allocate+copy; typic wrapper deallocates so
+        // rustc can plant the wipe fact (T is known here).
+        let new_ptr = unsafe { self.inner.alloc_copy_for_wipe(new_layout, Some(ptr), new_size)? };
         unsafe {
-            ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_size);
             self.inner.alloc.deallocate(ptr, layout);
             self.inner.set_ptr_and_cap(new_ptr, cap);
         }
@@ -760,6 +754,33 @@ const impl<A: [const] Allocator + [const] Destruct> RawVecInner<A> {
         };
 
         memory.map_err(const |_| AllocError { layout: new_layout, non_exhaustive: () }.into())
+    }
+
+    /// M7.2a-w3 [LLM-generated]: type-erased typic relocate. Allocate
+    /// `new_layout` and copy `copy_len` bytes from `old_ptr` (if any).
+    /// The typic RawVec<T> wrapper deallocates the old block so rustc can
+    /// plant mem.wipe_cap_words. Marked `cold` (like `finish_grow`, not
+    /// `inline(never)`) so typic T share one body while LLVM may still
+    /// inline a hot relocate. `copy_len` must fit in `new_layout` and,
+    /// when `old_ptr` is `Some`, in the old allocation.
+    #[cold]
+    unsafe fn alloc_copy_for_wipe(
+        &self,
+        new_layout: Layout,
+        old_ptr: Option<NonNull<u8>>,
+        copy_len: usize,
+    ) -> Result<NonNull<[u8]>, TryReserveError> {
+        let new_ptr = self.alloc.allocate(new_layout).map_err(
+            const |_| -> TryReserveError {
+                AllocError { layout: new_layout, non_exhaustive: () }.into()
+            },
+        )?;
+        if let Some(src) = old_ptr {
+            unsafe {
+                ptr::copy_nonoverlapping(src.as_ptr(), new_ptr.as_mut_ptr(), copy_len);
+            }
+        }
+        Ok(new_ptr)
     }
 }
 
