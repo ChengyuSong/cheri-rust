@@ -84,6 +84,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let name = bx.tcx().item_name(instance.def_id());
         let fn_args = instance.args;
 
+        // M7.2a-w2 [LLM-generated]: typic wipe predicate. Lower to a const
+        // bool so LLVM DCE keeps cap-free / flag-off RawVec grow on today's
+        // alloc.grow path (byte-identical flag-off).
+        if name == sym::cheri_ty_may_contain_caps {
+            let tp_ty = fn_args.type_at(0);
+            let val = ty::typic_wipe_caps(bx.tcx(), tp_ty);
+            return IntrinsicResult::Operand(OperandValue::Immediate(bx.const_bool(val)));
+        }
+
         // If we're swapping something that's *not* an `OperandValue::Ref`,
         // then we can do it directly and avoid the alloca.
         // Otherwise, we'll let the fallback MIR body take care of it.

@@ -47,14 +47,42 @@ pub fn drop_box_node(b: Box<CapNode>) {
     core::mem::drop(b);
 }
 
-// Facts live in monomorphized RawVec / Box drop, which rustc emits before
-// the no_mangle wrappers at -Copt-level=0. Cap-free RawVec<u8> has no fact.
-// on: RawVec<alloc::rc::Rc
+// M7.2a-w2: typic RawVec grow/shrink relocate (and shrink-to-0) emit the
+// fact on the abandoned old buffer. Cap-free Vec<u8> still does not.
+#[no_mangle]
+pub fn grow_vec_str(v: &mut Vec<&str>) {
+    v.reserve(32);
+}
+
+#[no_mangle]
+pub fn grow_vec_u8(v: &mut Vec<u8>) {
+    v.reserve(32);
+}
+
+#[no_mangle]
+pub fn shrink0_vec_str(v: &mut Vec<&str>) {
+    let n = v.len();
+    v.truncate(0);
+    v.shrink_to_fit();
+    let _ = n;
+}
+
+// Facts live in monomorphized RawVec / Box drop and typic grow/shrink helpers.
+// Unique definition comments (not drop_glue) keep windows order-stable.
+// Cap-free RawVec<u8> helpers are still emitted at -Copt-level=0 (both
+// typic branches) but must not get a fact. Flag-off emits nothing.
+// on: <alloc::raw_vec::RawVec<&str>>::shrink_wipe
 // on: "mem.wipe_cap_words"
-// on: RawVec<&str>
+// on: <alloc::raw_vec::RawVec<&str>>::finish_grow_wipe
 // on: "mem.wipe_cap_words"
-// on: RawVec<u8>
+// on: <alloc::raw_vec::RawVec<u8>>::finish_grow_wipe
 // on-NOT: "mem.wipe_cap_words"
-// on: Box<wipe_cap_words::CapNode>
+// on: <alloc::raw_vec::RawVec<alloc::rc::Rc<u32>> as core::ops::drop::Drop>::drop
+// on: "mem.wipe_cap_words"
+// on: <alloc::raw_vec::RawVec<&str> as core::ops::drop::Drop>::drop
+// on: "mem.wipe_cap_words"
+// on: <alloc::raw_vec::RawVec<u8> as core::ops::drop::Drop>::drop
+// on-NOT: "mem.wipe_cap_words"
+// on: <alloc::boxed::Box<wipe_cap_words::CapNode> as core::ops::drop::Drop>::drop
 // on: "mem.wipe_cap_words"
 // off-NOT: "mem.wipe_cap_words"

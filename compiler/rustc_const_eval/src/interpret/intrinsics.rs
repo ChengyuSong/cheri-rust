@@ -205,6 +205,16 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 let val = self.const_val_to_op(val, tcx.types.bool, Some(dest.layout))?;
                 self.copy_op(&val, dest)?;
             }
+            // M7.2a-w2 [LLM-generated]: typic wipe predicate, same flags as
+            // the dealloc-wipe fact emitter. False when wipe is off or the
+            // target is not CHERI, so flag-off const-eval matches today's path.
+            sym::cheri_ty_may_contain_caps => {
+                let tp_ty = instance.args.type_at(0);
+                ensure_monomorphic_enough(tp_ty)?;
+                let val = ConstValue::from_bool(ty::typic_wipe_caps(tcx, tp_ty));
+                let val = self.const_val_to_op(val, tcx.types.bool, Some(dest.layout))?;
+                self.copy_op(&val, dest)?;
+            }
             sym::type_id => {
                 let tp_ty = instance.args.type_at(0);
                 ensure_monomorphic_enough(tp_ty)?;

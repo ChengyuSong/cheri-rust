@@ -3326,6 +3326,20 @@ pub const unsafe fn cheri_invalidate<T: PointeeSized>(ptr: *const T) -> *const T
     ptr
 }
 
+/// M7.2a-w2 [LLM-generated]: whether monomorphized `T` may contain a CHERI
+/// capability *and* type-guided wipe is enabled for this session.
+///
+/// rustc const-eval and LLVM codegen lower this to a constant (`true` only on
+/// a CHERI target with `-Zcheri-annotate` and `-Zcheri-wipe-cap-words`, both
+/// default-on). The fallback body is `false`, so cap-free types and flag-off
+/// builds keep today's `alloc.grow` path.
+#[rustc_nounwind]
+#[unstable(feature = "core_intrinsics", issue = "none")]
+#[rustc_intrinsic]
+pub const unsafe fn cheri_ty_may_contain_caps<T: ?Sized>() -> bool {
+    false
+}
+
 /// This is an accidentally-stable alias to [`ptr::write_bytes`]; use that instead.
 // Note (intentionally not in the doc comment): `ptr::write_bytes` adds some extra
 // debug assertions; if you are writing compiler tests or code inside the standard library

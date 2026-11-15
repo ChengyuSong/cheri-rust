@@ -642,6 +642,7 @@ symbols! {
         mem_contract_site,
         cheri_cap_bounds_checks,
         cheri_invalidate,
+        cheri_ty_may_contain_caps,
         cheri_without_provenance,
         cheriot_attributes,
         cheriot_mmio,

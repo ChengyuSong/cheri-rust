@@ -80,7 +80,6 @@
 
 use rustc_abi::{Align, CanonAbi};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_index::IndexVec;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
@@ -4087,67 +4086,7 @@ fn wipe_def_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> String {
 /// buffer pointer); the *body* of `String` / `Vec<u8>` being returned is
 /// `T = u8` and is no.
 fn ty_may_contain_caps<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
-    fn is_zst<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
-        tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(ty))
-            .map(|l| l.is_zst())
-            .unwrap_or(false)
-    }
-    fn rec<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, seen: &mut FxHashSet<Ty<'tcx>>) -> bool {
-        let ty = tcx
-            .try_normalize_erasing_regions(
-                ty::TypingEnv::fully_monomorphized(),
-                ty::Unnormalized::new_wip(ty),
-            )
-            .unwrap_or(ty);
-        if !seen.insert(ty) {
-            // Cycle: no additional information from this edge.
-            return false;
-        }
-        match *ty.kind() {
-            ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Never | ty::Str
-            | ty::FnDef(..) => false,
-            ty::Ref(..) | ty::RawPtr(..) | ty::FnPtr(..) => true,
-            ty::Array(elem, _) | ty::Slice(elem) | ty::Pat(elem, _) => rec(tcx, elem, seen),
-            ty::Tuple(ts) => ts.iter().any(|t| rec(tcx, t, seen)),
-            ty::Adt(def, args) => {
-                if def.is_phantom_data() {
-                    return false;
-                }
-                if tcx.is_lang_item(def.did(), LangItem::MaybeUninit) {
-                    return rec(tcx, args.type_at(0), seen);
-                }
-                def.all_fields().any(|f| {
-                    let ft = f.ty(tcx, args).skip_norm_wip();
-                    !is_zst(tcx, ft) && rec(tcx, ft, seen)
-                })
-            }
-            ty::Closure(_, args) => rec(tcx, args.as_closure().tupled_upvars_ty(), seen),
-            ty::Coroutine(_, args) => {
-                let c = args.as_coroutine();
-                rec(tcx, c.tupled_upvars_ty(), seen)
-                    || rec(tcx, c.resume_ty(), seen)
-                    || rec(tcx, c.yield_ty(), seen)
-                    || rec(tcx, c.return_ty(), seen)
-            }
-            ty::CoroutineClosure(_, args) => {
-                rec(tcx, args.as_coroutine_closure().tupled_upvars_ty(), seen)
-            }
-            // dyn, foreign, unsubst generic, infer, alias that did not
-            // normalize, witnesses: conservative yes.
-            ty::Dynamic(..)
-            | ty::Foreign(_)
-            | ty::Param(_)
-            | ty::Placeholder(_)
-            | ty::Infer(_)
-            | ty::Bound(..)
-            | ty::Error(_)
-            | ty::Alias(..)
-            | ty::CoroutineWitness(..)
-            | ty::UnsafeBinder(_) => true,
-        }
-    }
-    let mut seen = FxHashSet::default();
-    rec(tcx, ty, &mut seen)
+    ty::ty_may_contain_caps(tcx, ty)
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -4172,7 +4111,21 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             name.as_str(),
             "shrink_to_fit" | "try_shrink_to_fit" | "shrink" | "shrink_unchecked"
         );
-        if !is_drop && !is_shrink {
+        // M7.2a-w2: typic T-aware grow / shrink relocate helpers (and the
+        // wrappers that may contain the dealloc after inlining).
+        let is_w2_relocate = matches!(
+            name.as_str(),
+            "grow_one"
+                | "reserve"
+                | "try_reserve"
+                | "reserve_exact"
+                | "try_reserve_exact"
+                | "finish_grow_wipe"
+                | "grow_amortized_wipe"
+                | "grow_exact_wipe"
+                | "shrink_wipe"
+        );
+        if !is_drop && !is_shrink && !is_w2_relocate {
             return None;
         }
         let self_ty = if let Some(impl_did) = tcx.impl_of_assoc(def_id) {
@@ -4501,15 +4454,35 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 "shrink_to_fit" | "try_shrink_to_fit" | "shrink" | "shrink_unchecked"
             )
         });
-        if is_shrink_site {
+        let is_w2_relocate = self_name.is_some_and(|s| {
+            matches!(
+                s.as_str(),
+                "grow_one"
+                    | "reserve"
+                    | "try_reserve"
+                    | "reserve_exact"
+                    | "try_reserve_exact"
+                    | "finish_grow_wipe"
+                    | "grow_amortized_wipe"
+                    | "grow_exact_wipe"
+                    | "shrink_wipe"
+            )
+        });
+        if is_w2_relocate {
+            // typic T-aware explicit alloc+copy+wipe+dealloc (or shrink-to-0
+            // dealloc). Every deallocate in these helpers is of an abandoned
+            // (or fully returned) buffer; never of a still-live in-place grow.
+            if !self.wipe_is_final_dealloc_callee(inst) {
+                return;
+            }
+        } else if is_shrink_site {
             if !self.wipe_is_rawvec_shrink_callee(inst) && !self.wipe_is_final_dealloc_callee(inst)
             {
                 return;
             }
-            // Only wipe when shrinking all the way to zero (returning the
-            // block). A non-zero shrink keeps the buffer (w2). A
-            // non-constant cap is left for w2 rather than inserting a
-            // runtime branch here.
+            // Non-w2 shrink wrappers: still only const-0 (w1). typic T now
+            // goes through shrink_wipe, which is handled as is_w2_relocate
+            // and covers non-const shrink-to-0 plus relocating shrinks.
             if self.wipe_shrink_new_cap(bx, fn_abi, llargs) != Some(0) {
                 return;
             }
