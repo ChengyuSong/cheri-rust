@@ -187,6 +187,10 @@ pub(crate) fn compile_codegen_unit(
                 cx.coverageinfo_finalize();
             }
 
+            // [LLM-generated] M7.1d CR-1: typic C-root table, before llvm.used
+            // so the header and slots are retained as used globals.
+            crate::cheri_croot::emit_croot_table(&mut cx);
+
             // Create the llvm.used variable.
             if !cx.used_statics.is_empty() {
                 cx.create_used_variable_impl(c"llvm.used", &cx.used_statics);

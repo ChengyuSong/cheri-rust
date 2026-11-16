@@ -124,7 +124,7 @@ pub mod abstract_const;
 pub mod adjustment;
 pub mod cast;
 pub mod cheri_caps;
-pub use cheri_caps::{ty_may_contain_caps, typic_wipe_caps, wipe_cap_words_enabled};
+pub use cheri_caps::{ty_is_data_cap, ty_may_contain_caps, typic_wipe_caps, wipe_cap_words_enabled};
 pub mod codec;
 // FIXME(#159654): This should get deleted soon
 pub mod consts;
