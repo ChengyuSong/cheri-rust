@@ -25,6 +25,7 @@ mod back;
 mod base;
 mod builder;
 mod callee;
+mod cheri_croot;
 mod common;
 mod consts;
 mod context;

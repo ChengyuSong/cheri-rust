@@ -87,3 +87,60 @@ pub fn wipe_cap_words_enabled(tcx: TyCtxt<'_>) -> bool {
 pub fn typic_wipe_caps<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
     wipe_cap_words_enabled(tcx) && ty_may_contain_caps(tcx, ty)
 }
+
+/// True when `ty` is a writable typic *data* capability (a raw pointer or
+/// reference, or a transparent / MaybeUninit wrapper of one). Function
+/// pointers are typic for wipe purposes but are not C-root data slots
+/// (FFI_CB stays out of the CR-1 table). ADTs that contain caps but are
+/// not themselves a single cap-sized slot return false; field-level C-root
+/// entries are a later extension.
+pub fn ty_is_data_cap<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    fn rec<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, seen: &mut FxHashSet<Ty<'tcx>>) -> bool {
+        let ty = tcx
+            .try_normalize_erasing_regions(
+                ty::TypingEnv::fully_monomorphized(),
+                ty::Unnormalized::new_wip(ty),
+            )
+            .unwrap_or(ty);
+        if !seen.insert(ty) {
+            return false;
+        }
+        match *ty.kind() {
+            ty::Ref(..) | ty::RawPtr(..) => true,
+            ty::FnPtr(..) => false,
+            ty::Pat(elem, _) => rec(tcx, elem, seen),
+            ty::Adt(def, args) => {
+                if def.is_phantom_data() {
+                    return false;
+                }
+                if tcx.is_lang_item(def.did(), LangItem::MaybeUninit) {
+                    return rec(tcx, args.type_at(0), seen);
+                }
+                // Transparent newtype around a data cap is itself a cap slot.
+                if def.repr().transparent() {
+                    let mut only = None;
+                    for f in def.all_fields() {
+                        let ft = f.ty(tcx, args).skip_norm_wip();
+                        let zst = tcx
+                            .layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(ft))
+                            .map(|l| l.is_zst())
+                            .unwrap_or(false);
+                        if zst {
+                            continue;
+                        }
+                        if only.is_some() {
+                            return false;
+                        }
+                        only = Some(ft);
+                    }
+                    return only.is_some_and(|ft| rec(tcx, ft, seen));
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+    let mut seen = FxHashSet::default();
+    rec(tcx, ty, &mut seen)
+}
+
