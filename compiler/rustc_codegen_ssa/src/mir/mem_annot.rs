@@ -32,9 +32,14 @@
 //!   store of a capability into a nameable local destination (M7.1d B2a): a
 //!   `ptr::read` dest, a `ptr::write` into a local, or a field of a live local
 //!   struct. The late CHERI pass may null `dest` at the source `mem.free` if
-//!   it still holds `cap`. Statics, FFI, and `Box::leak` destinations are not
-//!   emitted. Gated by `-Zcheri-annotate` and `-Zcheri-store-into` (default on;
-//!   `no` is byte-identical to f88cb241).
+//!   it still holds `cap`. `Box::leak` destinations are not emitted. Gated by
+//!   `-Zcheri-annotate` and `-Zcheri-store-into` (default on; `no` is
+//!   byte-identical to f88cb241).
+//! - B2b-2 also emits `mem.store_into` after `ptr::write_volatile` when the
+//!   destination is a rustc-named static DefId (or a field of one). Locals
+//!   (official trackb u0) are not facted. `extern "C"` bodies and TLS are
+//!   excluded, so FFI_SLOT is not a dest. The late CHERI pass decides
+//!   whether a ready global dest is wiped (B2b-1).
 //! - `call void @llvm.mem.fact() [ "mem.store_into_slot"(ptr base, i64 off, ptr cap) ]`
 //!   after a store into an indexed / GEP slot (M7.1d B2c): a `ptr::write` through
 //!   `as_mut_ptr().add(i)`, `get_unchecked_mut`, or a field of a container
@@ -3711,9 +3716,143 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         );
         let name = s.rsplit("::").next().unwrap_or("");
         // B2a names ptr::write / write_unaligned dests. write_volatile is
-        // used by the official trackb u0 control, which compares a dangling
-        // pointer address after free and must not be snap-nulled.
+        // not in this set: official trackb u0 writes a dangling pointer
+        // into a local `slot` and must not be snap-nulled. B2b-2 facts
+        // write_volatile only through is_ptr_write_volatile_fn, and only
+        // when the dest is a rustc-named static DefId.
         matches!(name, "write" | "write_unaligned") && s.contains("::ptr::")
+    }
+
+    fn is_ptr_write_volatile_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
+        let name = s.rsplit("::").next().unwrap_or("");
+        name == "write_volatile" && s.contains("::ptr::")
+    }
+
+    /// B2b-2: walk a write_volatile dest pointer back to a rustc-named
+    /// static DefId (the static itself or a field / const GEP of one).
+    /// TLS, arguments, and ordinary locals return None.
+    fn store_into_static_defid(
+        &self,
+        op: &mir::Operand<'tcx>,
+        seen: &mut FxHashSet<mir::Local>,
+    ) -> Option<DefId> {
+        match op {
+            mir::Operand::Copy(p) | mir::Operand::Move(p) => {
+                self.store_into_static_from_place(*p, seen)
+            }
+            mir::Operand::Constant(c) => self.store_into_static_from_const(c),
+            mir::Operand::RuntimeChecks(_) => None,
+        }
+    }
+
+    fn store_into_static_from_const(&self, c: &mir::ConstOperand<'tcx>) -> Option<DefId> {
+        let tcx = self.cx.tcx();
+        let def_id = c.check_static_ptr(tcx)?;
+        if tcx.is_static(def_id) && !tcx.is_thread_local_static(def_id) {
+            Some(def_id)
+        } else {
+            None
+        }
+    }
+
+    fn store_into_static_from_place(
+        &self,
+        p: mir::Place<'tcx>,
+        seen: &mut FxHashSet<mir::Local>,
+    ) -> Option<DefId> {
+        // Deref / Field / Index projections just name a slot inside the
+        // static; the base local must originate at the static address.
+        self.store_into_static_from_local(p.local, seen)
+    }
+
+    fn store_into_static_from_local(
+        &self,
+        local: mir::Local,
+        seen: &mut FxHashSet<mir::Local>,
+    ) -> Option<DefId> {
+        if !seen.insert(local) {
+            return None;
+        }
+        if local.index() <= self.mir.arg_count {
+            return None;
+        }
+        let mut found = None;
+        for bb in self.mir.basic_blocks.iter() {
+            for stmt in &bb.statements {
+                let mir::StatementKind::Assign(assign) = &stmt.kind else { continue };
+                if assign.0.as_local() != Some(local) {
+                    continue;
+                }
+                let Some(def_id) = self.store_into_static_from_rvalue(&assign.1, seen) else {
+                    return None;
+                };
+                if found.is_some_and(|prev| prev != def_id) {
+                    return None;
+                }
+                found = Some(def_id);
+            }
+            if let mir::TerminatorKind::Call { func, args, destination, .. } = &bb.terminator().kind
+            {
+                if destination.as_local() != Some(local) {
+                    continue;
+                }
+                if self.callee_is(
+                    func,
+                    &[
+                        "as_mut_ptr",
+                        "as_ptr",
+                        "add",
+                        "offset",
+                        "wrapping_add",
+                        "wrapping_offset",
+                        "get_unchecked_mut",
+                        "index_mut",
+                        "get_mut",
+                    ],
+                ) {
+                    let Some(a0) = args.first() else { return None };
+                    let Some(def_id) = self.store_into_static_defid(&a0.node, seen) else {
+                        return None;
+                    };
+                    if found.is_some_and(|prev| prev != def_id) {
+                        return None;
+                    }
+                    found = Some(def_id);
+                    continue;
+                }
+                return None;
+            }
+        }
+        found
+    }
+
+    fn store_into_static_from_rvalue(
+        &self,
+        rvalue: &Rvalue<'tcx>,
+        seen: &mut FxHashSet<mir::Local>,
+    ) -> Option<DefId> {
+        match rvalue {
+            Rvalue::Use(op, _) | Rvalue::Cast(_, op, _) => self.store_into_static_defid(op, seen),
+            Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
+                self.store_into_static_from_place(*p, seen)
+            }
+            Rvalue::Aggregate(kind, ops) if matches!(**kind, mir::AggregateKind::RawPtr(..)) => {
+                ops.iter().next().and_then(|op| self.store_into_static_defid(op, seen))
+            }
+            Rvalue::BinaryOp(op, operands)
+                if matches!(
+                    *op,
+                    mir::BinOp::Offset | mir::BinOp::Add | mir::BinOp::AddUnchecked
+                ) =>
+            {
+                self.store_into_static_defid(&operands.0, seen)
+            }
+            Rvalue::ThreadLocalRef(_) => None,
+            _ => None,
+        }
     }
 
     fn is_ptr_read_fn(&self, instance: ty::Instance<'tcx>) -> bool {
@@ -3722,6 +3861,40 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         );
         let name = s.rsplit("::").next().unwrap_or("");
         matches!(name, "read" | "read_unaligned" | "read_volatile") && s.contains("::ptr::")
+    }
+
+    /// B2b-2: fact an inlined `intrinsics::volatile_store` (O2 lowers
+    /// `ptr::write_volatile` to this) only when the dest is a rustc-named
+    /// static DefId. Locals (trackb u0) and extern "C" / FFI_SLOT are not
+    /// facted. The `ptr::write_volatile` call path is handled in
+    /// `mem_store_into_on_call`.
+    pub(crate) fn mem_store_into_on_volatile_store(
+        &mut self,
+        bx: &mut Bx,
+        dest: Bx::Value,
+        cap_op: &crate::mir::operand::OperandRef<'tcx, Bx::Value>,
+    ) {
+        if !self.store_into_enabled() {
+            self.mem_store_into_arg0 = None;
+            return;
+        }
+        if self.fn_abi.conv == CanonAbi::C {
+            self.mem_store_into_arg0 = None;
+            return;
+        }
+        let Some(arg0) = self.mem_store_into_arg0.take() else {
+            return;
+        };
+        if self.store_into_static_defid(&arg0, &mut Default::default()).is_some() {
+            if let Some(cap) = self.store_into_operand_cap(*cap_op) {
+                let slot = self.store_into_operand_slot(bx, &arg0, &mut Default::default());
+                self.store_into_emit(bx, dest, cap, slot);
+            } else {
+                self.mem_stats.store_into_skipped += 1;
+            }
+        } else {
+            self.mem_stats.store_into_skipped += 1;
+        }
     }
 
     /// After a call: fact a cap return stored into a nameable local (ptr::read),
@@ -3757,6 +3930,21 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => false,
                 };
                 if dest_ok {
+                    let slot = self.store_into_operand_slot(bx, &arg0, &mut Default::default());
+                    self.store_into_emit(bx, llargs[0], llargs[1], slot);
+                } else {
+                    self.mem_stats.store_into_skipped += 1;
+                }
+            }
+        } else if let Some(inst) = instance
+            && self.is_ptr_write_volatile_fn(inst)
+            && llargs.len() >= 2
+            && self.fn_abi.conv != CanonAbi::C
+        {
+            // B2b-2: fact write_volatile only into a rustc-named static.
+            // Locals (trackb u0) and extern "C" / FFI_SLOT are not facted.
+            if let Some(arg0) = self.mem_store_into_arg0.take() {
+                if self.store_into_static_defid(&arg0, &mut Default::default()).is_some() {
                     let slot = self.store_into_operand_slot(bx, &arg0, &mut Default::default());
                     self.store_into_emit(bx, llargs[0], llargs[1], slot);
                 } else {

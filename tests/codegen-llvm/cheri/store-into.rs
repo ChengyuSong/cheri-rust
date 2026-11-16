@@ -1,15 +1,20 @@
-// M7.1d B2a [LLM-generated]: a store of a capability into a nameable local
-// destination emits
+// M7.1d B2a / B2b-2 [LLM-generated]: a store of a capability into a
+// nameable destination emits
 //   call addrspace(200) void @llvm.mem.fact() [ "mem.store_into"(ptr addrspace(200) <dest>, ptr addrspace(200) <cap>) ]
 // after the store. Destinations covered: a `ptr::read` dest, a `ptr::write`
-// into a local, and a field of a live local struct. Statics, FFI, and
-// `Box::leak` destinations are not emitted. The late CHERI pass may null
-// `dest` at the source `mem.free`. Gated by `-Zcheri-annotate` and
-// `-Zcheri-store-into` (default on; `no` emits nothing).
+// into a local, a field of a live local struct, and (B2b-2) a
+// `ptr::write_volatile` into a rustc-named static DefId (or a field of
+// one). Locals written with write_volatile (official trackb u0),
+// `extern "C"` bodies (FFI_SLOT), and `Box::leak` destinations are not
+// emitted. The late CHERI pass may null `dest` at the source `mem.free`.
+// Gated by `-Zcheri-annotate` and `-Zcheri-store-into` (default on; `no`
+// emits nothing).
 //
-//@ revisions: on off
-//@ compile-flags: -Copt-level=0 -Cdebuginfo=0
-//@[off] compile-flags: -Zcheri-store-into=no
+//@ revisions: on off onO2
+//@ compile-flags: -Cdebuginfo=0
+//@[on] compile-flags: -Copt-level=0
+//@[off] compile-flags: -Copt-level=0 -Zcheri-store-into=no
+//@[onO2] compile-flags: -Copt-level=2
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]
@@ -143,4 +148,70 @@ pub fn extend_caps(b: &u64, d: &u64) {
     let mut v: Vec<&u64> = Vec::with_capacity(2);
     v.extend_from_slice(&caps);
     core::hint::black_box(&v);
+}
+
+static mut STATIC_SLOT: *const u64 = core::ptr::null();
+static mut STATIC_HOLD: RawHold = RawHold { _pad: 0, p: core::ptr::null() };
+
+// B2b-2: write_volatile into a named static emits mem.store_into.
+// on-LABEL: @write_volatile_static(
+// on: "mem.store_into"
+// off-LABEL: @write_volatile_static(
+// off-NOT: "mem.store_into"
+// off: ret
+// onO2-LABEL: @write_volatile_static(
+// onO2: "mem.store_into"
+#[no_mangle]
+pub unsafe fn write_volatile_static(b: &u64) {
+    ptr::write_volatile(&raw mut STATIC_SLOT, b as *const u64);
+    core::hint::black_box(&raw const STATIC_SLOT);
+}
+
+// B2b-2: write_volatile into a field of a named static also emits.
+// on-LABEL: @write_volatile_static_field(
+// on: "mem.store_into"
+// off-LABEL: @write_volatile_static_field(
+// off-NOT: "mem.store_into"
+// off: ret
+// onO2-LABEL: @write_volatile_static_field(
+// onO2: "mem.store_into"
+#[no_mangle]
+pub unsafe fn write_volatile_static_field(b: &u64) {
+    ptr::write_volatile(&raw mut STATIC_HOLD.p, b as *const u64);
+    core::hint::black_box(&raw const STATIC_HOLD);
+}
+
+// B2b-2: write_volatile into a local must not emit (trackb u0).
+// on-LABEL: @write_volatile_local(
+// on-NOT: "mem.store_into"
+// on: ret
+// off-LABEL: @write_volatile_local(
+// off-NOT: "mem.store_into"
+// off: ret
+// onO2-LABEL: @write_volatile_local(
+// The null init of `slot` may emit a B2a store_into of null; the volatile
+// write of `b` must not be facted (trackb u0).
+// onO2: store volatile ptr addrspace(200) %b, ptr addrspace(200) %slot
+// onO2-NOT: "mem.store_into"(ptr addrspace(200) %slot, ptr addrspace(200) %b)
+// onO2: ret
+#[no_mangle]
+pub fn write_volatile_local(b: &u64) {
+    let mut slot: *const u64 = ptr::null();
+    unsafe { ptr::write_volatile(&mut slot, b as *const u64) };
+    core::hint::black_box(&slot);
+}
+
+// B2b-2: an extern "C" body writing a static (FFI_SLOT-like) must not emit.
+// on-LABEL: @ffi_write_static(
+// on-NOT: "mem.store_into"
+// on: ret
+// off-LABEL: @ffi_write_static(
+// off-NOT: "mem.store_into"
+// off: ret
+// onO2-LABEL: @ffi_write_static(
+// onO2-NOT: "mem.store_into"
+// onO2: ret
+#[no_mangle]
+pub unsafe extern "C" fn ffi_write_static(b: *const u64) {
+    ptr::write_volatile(&raw mut STATIC_SLOT, b);
 }

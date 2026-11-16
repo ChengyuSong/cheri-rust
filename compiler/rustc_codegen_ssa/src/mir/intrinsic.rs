@@ -286,6 +286,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let dst = args[0].deref(bx.cx());
                 let dst = if name == sym::volatile_store { dst } else { dst.unaligned() };
                 args[1].val.volatile_store(bx, dst);
+                // B2b-2: O2 inlines ptr::write_volatile to volatile_store.
+                // Fact only a rustc-named static dest (not a local / FFI).
+                if name == sym::volatile_store {
+                    self.mem_store_into_on_volatile_store(bx, dst.val.llval, &args[1]);
+                }
                 OperandValue::ZeroSized
             }
             sym::disjoint_bitor => {
