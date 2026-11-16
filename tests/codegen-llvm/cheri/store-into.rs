@@ -10,9 +10,11 @@
 // Gated by `-Zcheri-annotate` and `-Zcheri-store-into` (default on; `no`
 // emits nothing).
 //
-//@ revisions: on off
-//@ compile-flags: -Copt-level=0 -Cdebuginfo=0
-//@[off] compile-flags: -Zcheri-store-into=no
+//@ revisions: on off onO2
+//@ compile-flags: -Cdebuginfo=0
+//@[on] compile-flags: -Copt-level=0
+//@[off] compile-flags: -Copt-level=0 -Zcheri-store-into=no
+//@[onO2] compile-flags: -Copt-level=2
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]
@@ -157,6 +159,8 @@ static mut STATIC_HOLD: RawHold = RawHold { _pad: 0, p: core::ptr::null() };
 // off-LABEL: @write_volatile_static(
 // off-NOT: "mem.store_into"
 // off: ret
+// onO2-LABEL: @write_volatile_static(
+// onO2: "mem.store_into"
 #[no_mangle]
 pub unsafe fn write_volatile_static(b: &u64) {
     ptr::write_volatile(&raw mut STATIC_SLOT, b as *const u64);
@@ -169,6 +173,8 @@ pub unsafe fn write_volatile_static(b: &u64) {
 // off-LABEL: @write_volatile_static_field(
 // off-NOT: "mem.store_into"
 // off: ret
+// onO2-LABEL: @write_volatile_static_field(
+// onO2: "mem.store_into"
 #[no_mangle]
 pub unsafe fn write_volatile_static_field(b: &u64) {
     ptr::write_volatile(&raw mut STATIC_HOLD.p, b as *const u64);
@@ -182,6 +188,12 @@ pub unsafe fn write_volatile_static_field(b: &u64) {
 // off-LABEL: @write_volatile_local(
 // off-NOT: "mem.store_into"
 // off: ret
+// onO2-LABEL: @write_volatile_local(
+// The null init of `slot` may emit a B2a store_into of null; the volatile
+// write of `b` must not be facted (trackb u0).
+// onO2: store volatile ptr addrspace(200) %b, ptr addrspace(200) %slot
+// onO2-NOT: "mem.store_into"(ptr addrspace(200) %slot, ptr addrspace(200) %b)
+// onO2: ret
 #[no_mangle]
 pub fn write_volatile_local(b: &u64) {
     let mut slot: *const u64 = ptr::null();
@@ -196,6 +208,9 @@ pub fn write_volatile_local(b: &u64) {
 // off-LABEL: @ffi_write_static(
 // off-NOT: "mem.store_into"
 // off: ret
+// onO2-LABEL: @ffi_write_static(
+// onO2-NOT: "mem.store_into"
+// onO2: ret
 #[no_mangle]
 pub unsafe extern "C" fn ffi_write_static(b: *const u64) {
     ptr::write_volatile(&raw mut STATIC_SLOT, b);

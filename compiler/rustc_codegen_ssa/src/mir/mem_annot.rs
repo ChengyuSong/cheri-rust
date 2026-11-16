@@ -3863,6 +3863,40 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         matches!(name, "read" | "read_unaligned" | "read_volatile") && s.contains("::ptr::")
     }
 
+    /// B2b-2: fact an inlined `intrinsics::volatile_store` (O2 lowers
+    /// `ptr::write_volatile` to this) only when the dest is a rustc-named
+    /// static DefId. Locals (trackb u0) and extern "C" / FFI_SLOT are not
+    /// facted. The `ptr::write_volatile` call path is handled in
+    /// `mem_store_into_on_call`.
+    pub(crate) fn mem_store_into_on_volatile_store(
+        &mut self,
+        bx: &mut Bx,
+        dest: Bx::Value,
+        cap_op: &crate::mir::operand::OperandRef<'tcx, Bx::Value>,
+    ) {
+        if !self.store_into_enabled() {
+            self.mem_store_into_arg0 = None;
+            return;
+        }
+        if self.fn_abi.conv == CanonAbi::C {
+            self.mem_store_into_arg0 = None;
+            return;
+        }
+        let Some(arg0) = self.mem_store_into_arg0.take() else {
+            return;
+        };
+        if self.store_into_static_defid(&arg0, &mut Default::default()).is_some() {
+            if let Some(cap) = self.store_into_operand_cap(*cap_op) {
+                let slot = self.store_into_operand_slot(bx, &arg0, &mut Default::default());
+                self.store_into_emit(bx, dest, cap, slot);
+            } else {
+                self.mem_stats.store_into_skipped += 1;
+            }
+        } else {
+            self.mem_stats.store_into_skipped += 1;
+        }
+    }
+
     /// After a call: fact a cap return stored into a nameable local (ptr::read),
     /// or a ptr::write into a nameable dest pointer.
     pub(crate) fn mem_store_into_on_call(
