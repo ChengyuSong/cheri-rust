@@ -1,10 +1,13 @@
 // M7.2c BTree node wipe [LLM-generated]: BTree nodes are freed by a direct
 // `Allocator::deallocate` in alloc::collections::btree::node, not through a
-// Box / RawVec / Rc drop. rustc now emits
-//   call addrspace(200) void @llvm.mem.fact() [ "mem.wipe_cap_words"(ptr addrspace(200) <node>, i64 <size>) ]
-// right before that deallocate, with the size taken from the Layout (the
-// `size` field, not `align`). `-Zcheri-wipe-btree-nodes=no` (or
-// `-Zcheri-wipe-cap-words=no`) emits nothing there.
+// Box / RawVec / Rc drop. rustc now emits `mem.wipe_cap_words` facts right
+// before that deallocate. When K and V hold no capabilities only the cap
+// fields are wiped: the parent link (16 bytes) always, and for an internal
+// node the 12-edge array (192 bytes) as chunks of at most 8 cap words
+// (128 + 64). When K or V may hold capabilities the whole node is wiped
+// (the Layout size, taken from the `size` field, not `align`).
+// `-Zcheri-wipe-btree-nodes=no` (or `-Zcheri-wipe-cap-words=no`) emits
+// nothing there.
 //
 //@ revisions: on off offall
 //@ compile-flags: -Cdebuginfo=0 -Copt-level=0
@@ -31,11 +34,33 @@ pub fn btree_churn(n: u32) -> usize {
     m.len()
 }
 
-// pop_internal_level frees an InternalNode<u32, u32> (304 bytes).
-// CHECK-LABEL: define{{.*}}pop_internal_level
-// on: "mem.wipe_cap_words"(ptr addrspace(200) %{{.*}}, i64 304)
-// on: call {{.*}}Allocator10deallocate{{.*}}%top, i64 16, i64 304)
+#[no_mangle]
+pub fn btree_churn_caps(n: u32, s: &'static str) -> usize {
+    let mut m: BTreeMap<u32, &'static str> = BTreeMap::new();
+    for i in 0..n {
+        m.insert(i, s);
+    }
+    for i in 0..n {
+        m.remove(&i);
+    }
+    m.len()
+}
+
+// pop_internal_level of BTreeMap<u32, &str>: V holds caps, whole node.
+// CHECK-LABEL: define{{.*}}marker5OwnedmReNtB1a_14LeafOrInternalE18pop_internal_level
+// on: "mem.wipe_cap_words"(ptr addrspace(200) %top, i64 608)
+// on-NEXT: ; call <alloc::alloc::Global as core::alloc::Allocator>::deallocate
 // off-NOT: "mem.wipe_cap_words"
-// off: call {{.*}}Allocator10deallocate{{.*}}%top, i64 16, i64 304)
 // offall-NOT: "mem.wipe_cap_words"
-// offall: call {{.*}}Allocator10deallocate{{.*}}%top, i64 16, i64 304)
+// CHECK: call {{.*}}Allocator10deallocate{{.*}}%top, i64 16, i64 608)
+
+// pop_internal_level of BTreeMap<u32, u32>: parent link + edges only.
+// CHECK-LABEL: define{{.*}}marker5OwnedmmNtB1a_14LeafOrInternalE18pop_internal_level
+// on: "mem.wipe_cap_words"(ptr addrspace(200) %top, i64 16)
+// on-NEXT: getelementptr inbounds i8, ptr addrspace(200) %top, i64 112
+// on-NEXT: "mem.wipe_cap_words"(ptr addrspace(200) %{{.*}}, i64 128)
+// on-NEXT: getelementptr inbounds i8, ptr addrspace(200) %top, i64 240
+// on-NEXT: "mem.wipe_cap_words"(ptr addrspace(200) %{{.*}}, i64 64)
+// off-NOT: "mem.wipe_cap_words"
+// offall-NOT: "mem.wipe_cap_words"
+// CHECK: call {{.*}}Allocator10deallocate{{.*}}%top, i64 16, i64 304)

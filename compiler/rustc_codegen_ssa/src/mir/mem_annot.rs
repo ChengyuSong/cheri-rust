@@ -99,6 +99,7 @@ use rustc_target::callconv::{FnAbi, PassMode};
 
 use super::operand::{OperandRef, OperandValue};
 use super::{FunctionCx, LocalRef};
+use crate::common::IntPredicate;
 use crate::traits::*;
 
 // Claim flags (llvm/IR/MemAnnot.h `ClaimKind` / `ClaimFlags`).
@@ -4735,8 +4736,85 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let Some((ptr, size)) = self.wipe_allocator_dealloc_ptr_size(bx, fn_abi, llargs) else {
             return false;
         };
-        bx.mem_fact("mem.wipe_cap_words", &[ptr, size]);
+        match self.wipe_btree_cap_fields() {
+            Some(f) => self.wipe_btree_emit_fields(bx, ptr, size, f),
+            None => bx.mem_fact("mem.wipe_cap_words", &[ptr, size]),
+        }
         true
+    }
+
+    /// Cap-field geometry of this BTree's nodes when K and V hold no
+    /// capabilities: then the only capabilities in a node are the parent
+    /// link and, in an internal node, the edge array. `None` (wipe the
+    /// whole returned block) if K or V may hold capabilities or the node
+    /// types cannot be found from the caller's `Self` type.
+    fn wipe_btree_cap_fields(&self) -> Option<BTreeCapFields> {
+        let tcx = self.cx.tcx();
+        let def_id = self.instance.def_id();
+        let self_ty = if let Some(impl_did) = tcx.impl_of_assoc(def_id) {
+            tcx.type_of(impl_did).instantiate(tcx, self.instance.args).skip_norm_wip()
+        } else {
+            let local_ty = self.monomorphize(self.mir.local_decls.get(mir::Local::from_u32(1))?.ty);
+            local_ty.builtin_deref(true).unwrap_or(local_ty)
+        };
+        let leaf = find_adt_by_path_suffix(tcx, self_ty, "btree::node::LeafNode", 6)?;
+        let ty::Adt(leaf_def, leaf_args) = *leaf.kind() else { return None };
+        if leaf_args.types().any(|t| ty_may_contain_caps(tcx, t)) {
+            return None;
+        }
+        let internal = find_adt_by_path_suffix(tcx, leaf, "btree::node::InternalNode", 6)?;
+        let ty::Adt(int_def, _) = *internal.kind() else { return None };
+        let field_idx = |def: ty::AdtDef<'tcx>, name: &str| {
+            def.non_enum_variant().fields.iter().position(|f| f.name.as_str() == name)
+        };
+        let leaf_l = self.cx.layout_of(leaf);
+        let int_l = self.cx.layout_of(internal);
+        let pi = field_idx(leaf_def, "parent")?;
+        let ei = field_idx(int_def, "edges")?;
+        Some(BTreeCapFields {
+            parent_off: leaf_l.fields.offset(pi).bytes(),
+            parent_size: leaf_l.field(self.cx, pi).size.bytes(),
+            leaf_size: leaf_l.size.bytes(),
+            edges_off: int_l.fields.offset(ei).bytes(),
+            edges_size: int_l.field(self.cx, ei).size.bytes(),
+            internal_size: int_l.size.bytes(),
+        })
+    }
+
+    /// Wipe the parent link always, and the edge array only when the block
+    /// is an internal node. A constant size decides at compile time; a
+    /// run-time size (`deallocate_and_ascend`) gets a branch on
+    /// `size == size_of::<InternalNode>()` around the edge fact.
+    fn wipe_btree_emit_fields(
+        &mut self,
+        bx: &mut Bx,
+        ptr: Bx::Value,
+        size: Bx::Value,
+        f: BTreeCapFields,
+    ) {
+        let at = |bx: &mut Bx, off: u64| {
+            if off == 0 { ptr } else { bx.inbounds_ptradd(ptr, bx.const_usize(off)) }
+        };
+        let parent = at(bx, f.parent_off);
+        bx.mem_fact("mem.wipe_cap_words", &[parent, bx.const_usize(f.parent_size)]);
+        match bx.const_to_opt_uint(size) {
+            Some(n) if n == f.leaf_size => {}
+            Some(n) if n == f.internal_size => {
+                wipe_btree_edges(bx, ptr, f);
+            }
+            Some(_) => bx.mem_fact("mem.wipe_cap_words", &[ptr, size]),
+            None => {
+                let is_internal =
+                    bx.icmp(IntPredicate::IntEQ, size, bx.const_usize(f.internal_size));
+                let wipe_bb = bx.append_sibling_block("btree_wipe_edges");
+                let cont_bb = bx.append_sibling_block("btree_wipe_cont");
+                bx.cond_br(is_internal, wipe_bb, cont_bb);
+                bx.switch_to_block(wipe_bb);
+                wipe_btree_edges(bx, ptr, f);
+                bx.br(cont_bb);
+                bx.switch_to_block(cont_bb);
+            }
+        }
     }
 
     /// `Allocator::deallocate(&self, ptr: NonNull<u8>, layout: Layout)`: the
@@ -4790,6 +4868,68 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
         }
         None
+    }
+}
+
+/// [LLM-generated] M7.2c: byte geometry of a BTree's node cap fields.
+#[derive(Clone, Copy)]
+struct BTreeCapFields {
+    parent_off: u64,
+    parent_size: u64,
+    leaf_size: u64,
+    edges_off: u64,
+    edges_size: u64,
+    internal_size: u64,
+}
+
+/// [LLM-generated] M7.2c: the edge-array fact, in chunks of at most eight
+/// capability words. A chunk that small is a constant-length fact the late
+/// pass unrolls in place; one 12-word fact would become a helper call,
+/// whose caller-saved clobbers perturb register allocation in the large
+/// inlined BTree loops more than the stores themselves cost.
+fn wipe_btree_edges<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+    bx: &mut Bx,
+    ptr: Bx::Value,
+    f: BTreeCapFields,
+) {
+    // The parent link is one capability, so its size is the word size.
+    let chunk = 8 * f.parent_size.max(1);
+    let mut off = 0;
+    while off < f.edges_size {
+        let n = chunk.min(f.edges_size - off);
+        let at = f.edges_off + off;
+        let p = if at == 0 { ptr } else { bx.inbounds_ptradd(ptr, bx.const_usize(at)) };
+        bx.mem_fact("mem.wipe_cap_words", &[p, bx.const_usize(n)]);
+        off += n;
+    }
+}
+
+/// [LLM-generated] M7.2c: find an ADT whose def path ends with `suffix`
+/// inside `ty`, through fields, raw pointers and references (depth-limited).
+fn find_adt_by_path_suffix<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+    suffix: &str,
+    depth: u32,
+) -> Option<Ty<'tcx>> {
+    if depth == 0 {
+        return None;
+    }
+    match *ty.kind() {
+        ty::Adt(def, args) => {
+            if wipe_def_path(tcx, def.did()).ends_with(suffix) {
+                return Some(ty);
+            }
+            def.all_fields().find_map(|f| {
+                find_adt_by_path_suffix(tcx, f.ty(tcx, args).skip_norm_wip(), suffix, depth - 1)
+            })
+        }
+        // `NonNull<T>` holds `pattern_type!(*const T is !null)`.
+        ty::RawPtr(t, _) | ty::Ref(_, t, _) | ty::Pat(t, _) => {
+            find_adt_by_path_suffix(tcx, t, suffix, depth - 1)
+        }
+        ty::Array(t, _) | ty::Slice(t) => find_adt_by_path_suffix(tcx, t, suffix, depth - 1),
+        _ => None,
     }
 }
 
