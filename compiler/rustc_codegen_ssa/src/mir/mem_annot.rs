@@ -4625,6 +4625,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if !self.wipe_cap_words_enabled() {
             return;
         }
+        // M7.2c: BTree nodes are freed by a direct `Allocator::deallocate`
+        // in btree/node.rs, not through a Box / RawVec / Rc drop, so the
+        // container-drop sites below never see them.
+        if let Some(inst) = instance
+            && self.wipe_btree_node_dealloc(bx, fn_abi, llargs, inst)
+        {
+            return;
+        }
         let Some(elem_ty) = self.wipe_container_elem_ty() else {
             return;
         };
@@ -4690,6 +4698,98 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         };
         bx.mem_fact("mem.wipe_cap_words", &[ptr, len]);
+    }
+}
+
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    /// [LLM-generated] M7.2c BTree node wipe. `BTreeMap` / `BTreeSet` nodes
+    /// are allocated with `Box::new_uninit_in` but freed with a direct
+    /// `alloc.deallocate(node.cast(), Layout::new::<LeafNode | InternalNode>())`
+    /// in `deallocate_and_ascend`, `pop_internal_level` and `do_merge`. Every
+    /// node holds a capability (the parent link), and an internal node also
+    /// holds its edge array, whose stale entries survive merges and root pops.
+    /// So the type test is always yes and no K / V walk is needed. The wipe
+    /// covers the whole returned `Layout` (all edges, not only `len + 1`),
+    /// like the container wipe. Returns true if the fact was emitted.
+    fn wipe_btree_node_dealloc(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+        inst: Instance<'tcx>,
+    ) -> bool {
+        let tcx = self.cx.tcx();
+        if !tcx.sess.opts.unstable_opts.cheri_wipe_btree_nodes {
+            return false;
+        }
+        let caller = wipe_def_path(tcx, self.instance.def_id());
+        if !caller.contains("collections::btree::") {
+            return false;
+        }
+        if tcx.opt_item_name(inst.def_id()).map_or(true, |n| n.as_str() != "deallocate") {
+            return false;
+        }
+        if !wipe_def_path(tcx, inst.def_id()).contains("Allocator") {
+            return false;
+        }
+        let Some((ptr, size)) = self.wipe_allocator_dealloc_ptr_size(bx, fn_abi, llargs) else {
+            return false;
+        };
+        bx.mem_fact("mem.wipe_cap_words", &[ptr, size]);
+        true
+    }
+
+    /// `Allocator::deallocate(&self, ptr: NonNull<u8>, layout: Layout)`: the
+    /// block pointer and the `Layout` *size*. The `Layout` scalar pair is in
+    /// memory order, which may put `align` first, so pick the `size` field
+    /// (declared field 0) by its offset.
+    fn wipe_allocator_dealloc_ptr_size(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        let tcx = self.cx.tcx();
+        let mut idx = 0usize;
+        let mut ptr: Option<Bx::Value> = None;
+        for arg in fn_abi.args.iter() {
+            let ty = arg.layout.ty;
+            match arg.mode {
+                PassMode::Ignore => continue,
+                PassMode::Pair(_, _) => {
+                    if is_layout_ty(tcx, ty) && idx + 1 < llargs.len() {
+                        let size_off = arg.layout.fields.offset(0).bytes();
+                        let v = if size_off == 0 { llargs[idx] } else { llargs[idx + 1] };
+                        return ptr.map(|p| (p, v));
+                    }
+                    idx += 2;
+                }
+                PassMode::Indirect { .. } if is_layout_ty(tcx, ty) => {
+                    if idx >= llargs.len() {
+                        return None;
+                    }
+                    let off = arg.layout.fields.offset(0).bytes();
+                    let align = arg.layout.field(self.cx, 0).align.abi;
+                    let addr = if off == 0 {
+                        llargs[idx]
+                    } else {
+                        bx.inbounds_ptradd(llargs[idx], bx.const_usize(off))
+                    };
+                    let v = bx.load(bx.type_isize(), addr, align);
+                    return ptr.map(|p| (p, v));
+                }
+                _ => {
+                    if idx >= llargs.len() {
+                        return None;
+                    }
+                    if is_ptr_or_nonnull(tcx, ty) {
+                        ptr = Some(llargs[idx]);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        None
     }
 }
 
