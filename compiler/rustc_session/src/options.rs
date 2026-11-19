@@ -2466,8 +2466,10 @@ options! {
         the alignment on CHERI RISC-V, and is byte-identical to the 2741027e merged state"),
     cheri_wipe_btree_nodes: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2c BTree node wipe: also emit `mem.wipe_cap_words`(ptr, size) \
-        immediately before each `Allocator::deallocate` of a BTree node inside \
-        `alloc::collections::btree` (leaf or internal; every node holds its parent-link \
+        immediately before each `Allocator::deallocate` of a BTree node written in the \
+        module marked `#![rustc_diagnostic_item = \"cheri_btree_node\"]` \
+        (`alloc::collections::btree::node`), found through the MIR inline scopes so \
+        that MIR inlining does not hide it (leaf or internal; every node holds its parent-link \
         capability, internal nodes also hold the child edge array). If K and V hold no \
         capabilities only the parent link and (internal nodes) the edge array are \
         wiped, in chunks of at most 8 cap words; otherwise the whole `Layout` size \

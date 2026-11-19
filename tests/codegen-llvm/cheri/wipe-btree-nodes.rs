@@ -1,7 +1,9 @@
 // M7.2c BTree node wipe [LLM-generated]: BTree nodes are freed by a direct
 // `Allocator::deallocate` in alloc::collections::btree::node, not through a
 // Box / RawVec / Rc drop. rustc now emits `mem.wipe_cap_words` facts right
-// before that deallocate. When K and V hold no capabilities only the cap
+// before that deallocate. The site is found by the module marker
+// `#![rustc_diagnostic_item = "cheri_btree_node"]` in node.rs, through the
+// call's MIR inline scopes, not by the caller's path. When K and V hold no capabilities only the cap
 // fields are wiped: the parent link (16 bytes) always, and for an internal
 // node the 12-edge array (192 bytes) as chunks of at most 8 cap words
 // (128 + 64). When K or V may hold capabilities the whole node is wiped

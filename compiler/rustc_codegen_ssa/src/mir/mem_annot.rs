@@ -541,6 +541,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llargs: &[Bx::Value],
         instance: Option<ty::Instance<'tcx>>,
+        call_scope: mir::SourceScope,
     ) {
         if let Some((tag, ops)) = self.mem_call_bundle.take() {
             bx.set_next_call_mem_bundle(tag, &ops);
@@ -560,7 +561,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
         // M7.2a-w1: emit mem.wipe_cap_words immediately before the dealloc
         // call (after element drop, in the last-ref / size!=0 branch).
-        self.mem_wipe_cap_words_prepare(bx, fn_abi, llargs, instance);
+        self.mem_wipe_cap_words_prepare(bx, fn_abi, llargs, instance, call_scope);
     }
 
     /// M7.1a: a `Box` / `Vec` (or `Option` of those) was just loaded or aliased by
@@ -4638,6 +4639,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llargs: &[Bx::Value],
         instance: Option<Instance<'tcx>>,
+        call_scope: mir::SourceScope,
     ) {
         if !self.wipe_cap_words_enabled() {
             return;
@@ -4646,7 +4648,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // in btree/node.rs, not through a Box / RawVec / Rc drop, so the
         // container-drop sites below never see them.
         if let Some(inst) = instance
-            && self.wipe_btree_node_dealloc(bx, fn_abi, llargs, inst)
+            && self.wipe_btree_node_dealloc(bx, fn_abi, llargs, inst, call_scope)
         {
             return;
         }
@@ -4725,55 +4727,126 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// in `deallocate_and_ascend`, `pop_internal_level` and `do_merge`. Every
     /// node holds a capability (the parent link), and an internal node also
     /// holds its edge array, whose stale entries survive merges and root pops.
-    /// So the type test is always yes and no K / V walk is needed. The wipe
-    /// covers the whole returned `Layout` (all edges, not only `len + 1`),
-    /// like the container wipe. Returns true if the fact was emitted.
+    ///
+    /// The site is found by a marker, not by the caller's name: the module
+    /// `alloc::collections::btree::node` carries
+    /// `#![rustc_diagnostic_item = "cheri_btree_node"]`, and a dealloc call
+    /// matches when the function that *wrote* it lies in that module. That
+    /// function is the innermost MIR-inlined instance on the call's source
+    /// scope chain (or this function itself), so MIR inlining into another
+    /// crate or module does not hide the site. If `Allocator::deallocate`
+    /// itself was MIR-inlined, the remaining `alloc::alloc::dealloc` /
+    /// `__rust_dealloc` call still has the node.rs function on its chain.
+    /// Returns true if facts were emitted.
     fn wipe_btree_node_dealloc(
         &mut self,
         bx: &mut Bx,
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llargs: &[Bx::Value],
         inst: Instance<'tcx>,
+        call_scope: mir::SourceScope,
     ) -> bool {
         let tcx = self.cx.tcx();
         if !tcx.sess.opts.unstable_opts.cheri_wipe_btree_nodes {
             return false;
         }
-        let caller = wipe_def_path(tcx, self.instance.def_id());
-        if !caller.contains("collections::btree::") {
+        if !self.wipe_is_node_dealloc_callee(inst) {
             return false;
         }
-        if tcx.opt_item_name(inst.def_id()).map_or(true, |n| n.as_str() != "deallocate") {
+        // Kept out of the pre-interned symbol table so that this CHERI-only
+        // marker does not rebuild every crate that depends on rustc_span.
+        #[allow(rustc::symbol_intern_string_literal)]
+        let marker_sym = Symbol::intern("cheri_btree_node");
+        let Some(marker) = tcx.get_diagnostic_item(marker_sym) else {
             return false;
-        }
-        if !wipe_def_path(tcx, inst.def_id()).contains("Allocator") {
+        };
+        let Some(origin) = self.wipe_btree_origin(call_scope, marker) else {
             return false;
-        }
+        };
         let Some((ptr, size)) = self.wipe_allocator_dealloc_ptr_size(bx, fn_abi, llargs) else {
             return false;
         };
-        match self.wipe_btree_cap_fields() {
+        match self.wipe_btree_cap_fields(origin) {
             Some(f) => self.wipe_btree_emit_fields(bx, ptr, size, f),
             None => bx.mem_fact("mem.wipe_cap_words", &[ptr, size]),
         }
         true
     }
 
+    /// `<_ as Allocator>::deallocate`, or what is left of it after MIR
+    /// inlining: `alloc::alloc::dealloc` or the `__rust_dealloc` shim.
+    fn wipe_is_node_dealloc_callee(&self, inst: Instance<'tcx>) -> bool {
+        let tcx = self.cx.tcx();
+        if tcx.codegen_fn_attrs(inst.def_id()).flags.contains(CodegenFnAttrFlags::DEALLOCATOR) {
+            return true;
+        }
+        let Some(name) = tcx.opt_item_name(inst.def_id()) else {
+            return false;
+        };
+        let path = wipe_def_path(tcx, inst.def_id());
+        match name.as_str() {
+            "deallocate" => path.contains("Allocator"),
+            "dealloc" => path.ends_with("alloc::alloc::dealloc"),
+            "__rust_dealloc" => true,
+            _ => false,
+        }
+    }
+
+    /// The function (monomorphized) whose body holds this call as written,
+    /// if it lies in the marked module. Walks the MIR-inlined instances on
+    /// the call's scope chain from the innermost out, then this function.
+    /// The innermost one inside the marked module wins.
+    fn wipe_btree_origin(&self, call_scope: mir::SourceScope, marker: DefId) -> Option<Instance<'tcx>> {
+        let tcx = self.cx.tcx();
+        let in_marked = |did: DefId| {
+            let mut cur = Some(tcx.typeck_root_def_id(did));
+            while let Some(d) = cur {
+                if d == marker {
+                    return true;
+                }
+                if tcx.def_kind(d) == DefKind::Mod {
+                    // Nearest enclosing module only.
+                    return false;
+                }
+                cur = tcx.opt_parent(d);
+            }
+            false
+        };
+        let scopes = &self.mir.source_scopes;
+        let mut cur = Some(call_scope);
+        while let Some(sc) = cur {
+            let data = &scopes[sc];
+            if let Some((callee, _)) = data.inlined {
+                if in_marked(callee.def_id()) {
+                    return Some(self.monomorphize(callee));
+                }
+            }
+            cur = data.inlined_parent_scope;
+        }
+        in_marked(self.instance.def_id()).then_some(self.instance)
+    }
+
     /// Cap-field geometry of this BTree's nodes when K and V hold no
     /// capabilities: then the only capabilities in a node are the parent
     /// link and, in an internal node, the edge array. `None` (wipe the
     /// whole returned block) if K or V may hold capabilities or the node
-    /// types cannot be found from the caller's `Self` type.
-    fn wipe_btree_cap_fields(&self) -> Option<BTreeCapFields> {
+    /// types cannot be found from the origin function's `Self` type or
+    /// parameter types.
+    fn wipe_btree_cap_fields(&self, origin: Instance<'tcx>) -> Option<BTreeCapFields> {
         let tcx = self.cx.tcx();
-        let def_id = self.instance.def_id();
-        let self_ty = if let Some(impl_did) = tcx.impl_of_assoc(def_id) {
-            tcx.type_of(impl_did).instantiate(tcx, self.instance.args).skip_norm_wip()
-        } else {
-            let local_ty = self.monomorphize(self.mir.local_decls.get(mir::Local::from_u32(1))?.ty);
-            local_ty.builtin_deref(true).unwrap_or(local_ty)
-        };
-        let leaf = find_adt_by_path_suffix(tcx, self_ty, "btree::node::LeafNode", 6)?;
+        let def_id = origin.def_id();
+        let mut roots: Vec<Ty<'tcx>> = Vec::new();
+        if let Some(impl_did) = tcx.impl_of_assoc(def_id) {
+            roots.push(tcx.type_of(impl_did).instantiate(tcx, origin.args).skip_norm_wip());
+        }
+        if matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
+            let sig = tcx.fn_sig(def_id).instantiate(tcx, origin.args).skip_norm_wip();
+            let sig = tcx.instantiate_bound_regions_with_erased(sig);
+            roots.extend(sig.inputs().iter().copied());
+        }
+        let leaf = roots
+            .iter()
+            .find_map(|&t| find_adt_by_path_suffix(tcx, t, "btree::node::LeafNode", 6))?;
         let ty::Adt(leaf_def, leaf_args) = *leaf.kind() else { return None };
         if leaf_args.types().any(|t| ty_may_contain_caps(tcx, t)) {
             return None;
@@ -4833,7 +4906,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
     }
 
-    /// `Allocator::deallocate(&self, ptr: NonNull<u8>, layout: Layout)`: the
+    /// `Allocator::deallocate(&self, ptr: NonNull<u8>, layout: Layout)` (also
+    /// `dealloc(ptr, layout)` and `__rust_dealloc(ptr, size, align)`): the
     /// block pointer and the `Layout` *size*. The `Layout` scalar pair is in
     /// memory order, which may put `align` first, so pick the `size` field
     /// (declared field 0) by its offset.
@@ -4878,6 +4952,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     }
                     if is_ptr_or_nonnull(tcx, ty) {
                         ptr = Some(llargs[idx]);
+                    } else if ptr.is_none() && matches!(*ty.kind(), ty::RawPtr(..)) {
+                        // `alloc::alloc::dealloc(ptr: *mut u8, layout)` and
+                        // `__rust_dealloc(ptr: *mut u8, size, align)`.
+                        ptr = Some(llargs[idx]);
+                    } else if ptr.is_some() && ty.is_integral() && !ty.is_bool() {
+                        // `__rust_dealloc(ptr, size, align)`: size first.
+                        return ptr.map(|p| (p, llargs[idx]));
                     }
                     idx += 1;
                 }
