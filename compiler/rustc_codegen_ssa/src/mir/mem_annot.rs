@@ -3725,6 +3725,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         matches!(name, "write" | "write_unaligned") && s.contains("::ptr::")
     }
 
+    /// `mem.store_into` takes `(ptr dest, ptr cap)`. A `write_volatile` of an
+    /// integer into a static (e.g. the HTIF `tohost` / `fromhost` words) is
+    /// not a capability store, and the fact with an `i64` operand fails the
+    /// IR verifier. [LLM-generated]
+    fn store_into_value_is_cap(bx: &Bx, v: Bx::Value) -> bool {
+        bx.cx().type_kind(bx.cx().val_ty(v)) == crate::common::TypeKind::Pointer
+    }
+
     fn is_ptr_write_volatile_fn(&self, instance: ty::Instance<'tcx>) -> bool {
         let s = rustc_middle::ty::print::with_no_trimmed_paths!(
             self.cx.tcx().def_path_str(instance.def_id())
@@ -3888,7 +3896,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         };
         if self.store_into_static_defid(&arg0, &mut Default::default()).is_some() {
-            if let Some(cap) = self.store_into_operand_cap(*cap_op) {
+            if let Some(cap) = self.store_into_operand_cap(*cap_op)
+                && Self::store_into_value_is_cap(bx, cap)
+            {
                 let slot = self.store_into_operand_slot(bx, &arg0, &mut Default::default());
                 self.store_into_emit(bx, dest, cap, slot);
             } else {
@@ -3946,7 +3956,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             // B2b-2: fact write_volatile only into a rustc-named static.
             // Locals (trackb u0) and extern "C" / FFI_SLOT are not facted.
             if let Some(arg0) = self.mem_store_into_arg0.take() {
-                if self.store_into_static_defid(&arg0, &mut Default::default()).is_some() {
+                if self.store_into_static_defid(&arg0, &mut Default::default()).is_some()
+                    && Self::store_into_value_is_cap(bx, llargs[1])
+                {
                     let slot = self.store_into_operand_slot(bx, &arg0, &mut Default::default());
                     self.store_into_emit(bx, llargs[0], llargs[1], slot);
                 } else {
