@@ -4554,6 +4554,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         llargs: &[Bx::Value],
     ) -> Option<(Bx::Value, Bx::Value)> {
         let tcx = self.cx.tcx();
+        // M7.2c follow-up: `Layout` is passed as a scalar pair in *memory*
+        // order, which on these targets is (align, size). The old code took
+        // element 0 of any pair, i.e. the alignment, as the length. With
+        // `-Zcheri-wipe-layout-size` (default yes) only a `Layout` pair
+        // counts and its `size` field is picked by offset.
+        let size_by_field = tcx.sess.opts.unstable_opts.cheri_wipe_layout_size;
         let mut idx = 0usize;
         let mut ptr: Option<Bx::Value> = None;
         let mut len: Option<Bx::Value> = None;
@@ -4561,9 +4567,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             match arg.mode {
                 PassMode::Ignore => continue,
                 PassMode::Pair(_, _) => {
-                    // Layout often lowers to (size, align). The first
-                    // element of the last such pair is the size.
-                    if idx < llargs.len() {
+                    if size_by_field {
+                        if is_layout_ty(tcx, arg.layout.ty) && idx + 1 < llargs.len() {
+                            let size_off = arg.layout.fields.offset(0).bytes();
+                            len = Some(if size_off == 0 { llargs[idx] } else { llargs[idx + 1] });
+                        }
+                    } else if idx < llargs.len() {
+                        // Old behavior: element 0 of the last pair.
                         len = Some(llargs[idx]);
                     }
                     idx += 2;
@@ -4596,7 +4606,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                 // llargs[idx] is that pointer.
                                 if matches!(arg.mode, PassMode::Indirect { .. }) {
                                     let align = size_ty_sz.field(self.cx, 0).align.abi;
-                                    let size = bx.load(bx.type_isize(), llargs[idx], align);
+                                    let off = size_ty_sz.fields.offset(0).bytes();
+                                    let addr = if size_by_field && off != 0 {
+                                        bx.inbounds_ptradd(llargs[idx], bx.const_usize(off))
+                                    } else {
+                                        llargs[idx]
+                                    };
+                                    let size = bx.load(bx.type_isize(), addr, align);
                                     len = Some(size);
                                 }
                             }

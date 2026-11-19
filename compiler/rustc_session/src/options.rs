@@ -2458,6 +2458,12 @@ options! {
         "[LLM-generated] M7.1d CR-1: emit a typic C-root table of C-visible          writable data-capability statics (stored from an `extern \"C\"` body          and/or exported as C data) for the late LLVM CHERI pass to walk at          `mem.free` (default: yes; `no` emits nothing and is byte-identical to          the merged B2b trees; CHERI targets only, also requires `-Zcheri-annotate`).          core/alloc/compiler_builtins are skipped; empty tables are not emitted"),
     cheri_wipe_cap_words: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2a-w1: emit `mem.wipe_cap_words`(ptr, len) facts at          T-aware RawVec / Box / Rc-Arc final dealloc (after element drop, before          deallocate, length is the returned Layout / capacity), for the late LLVM          CHERI pass to store cnull in each cap-sized word of a cap-containing          buffer (default: yes; `no` emits nothing and is byte-identical to          f75828ba; CHERI targets only, also requires `-Zcheri-annotate`).          Allowed in alloc and in non-local monomorphs of those drop/dealloc          functions only; does not re-enable general store_into in core/alloc"),
+    cheri_wipe_layout_size: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2c follow-up: when a `mem.wipe_cap_words` length is taken from a \
+        deallocate call's `Layout` argument (the fallback for Box / Rc of an unsized pointee, \
+        e.g. `Box<[T]>`, `Box<dyn Trait>`), use the Layout's `size` field, found by its offset \
+        (default: yes). `no` keeps the old reading of element 0 of the scalar pair, which is \
+        the alignment on CHERI RISC-V, and is byte-identical to the 2741027e merged state"),
     cheri_wipe_btree_nodes: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2c BTree node wipe: also emit `mem.wipe_cap_words`(ptr, size) \
         immediately before each `Allocator::deallocate` of a BTree node inside \
