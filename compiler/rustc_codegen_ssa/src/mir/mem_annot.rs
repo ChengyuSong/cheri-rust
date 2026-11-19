@@ -99,6 +99,7 @@ use rustc_target::callconv::{FnAbi, PassMode};
 
 use super::operand::{OperandRef, OperandValue};
 use super::{FunctionCx, LocalRef};
+use crate::common::IntPredicate;
 use crate::traits::*;
 
 // Claim flags (llvm/IR/MemAnnot.h `ClaimKind` / `ClaimFlags`).
@@ -540,6 +541,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llargs: &[Bx::Value],
         instance: Option<ty::Instance<'tcx>>,
+        call_scope: mir::SourceScope,
     ) {
         if let Some((tag, ops)) = self.mem_call_bundle.take() {
             bx.set_next_call_mem_bundle(tag, &ops);
@@ -559,7 +561,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
         // M7.2a-w1: emit mem.wipe_cap_words immediately before the dealloc
         // call (after element drop, in the last-ref / size!=0 branch).
-        self.mem_wipe_cap_words_prepare(bx, fn_abi, llargs, instance);
+        self.mem_wipe_cap_words_prepare(bx, fn_abi, llargs, instance, call_scope);
     }
 
     /// M7.1a: a `Box` / `Vec` (or `Option` of those) was just loaded or aliased by
@@ -4553,6 +4555,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         llargs: &[Bx::Value],
     ) -> Option<(Bx::Value, Bx::Value)> {
         let tcx = self.cx.tcx();
+        // M7.2c follow-up: `Layout` is passed as a scalar pair in *memory*
+        // order, which on these targets is (align, size). The old code took
+        // element 0 of any pair, i.e. the alignment, as the length. With
+        // `-Zcheri-wipe-layout-size` (default yes) only a `Layout` pair
+        // counts and its `size` field is picked by offset.
+        let size_by_field = tcx.sess.opts.unstable_opts.cheri_wipe_layout_size;
         let mut idx = 0usize;
         let mut ptr: Option<Bx::Value> = None;
         let mut len: Option<Bx::Value> = None;
@@ -4560,9 +4568,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             match arg.mode {
                 PassMode::Ignore => continue,
                 PassMode::Pair(_, _) => {
-                    // Layout often lowers to (size, align). The first
-                    // element of the last such pair is the size.
-                    if idx < llargs.len() {
+                    if size_by_field {
+                        if is_layout_ty(tcx, arg.layout.ty) && idx + 1 < llargs.len() {
+                            let size_off = arg.layout.fields.offset(0).bytes();
+                            len = Some(if size_off == 0 { llargs[idx] } else { llargs[idx + 1] });
+                        }
+                    } else if idx < llargs.len() {
+                        // Old behavior: element 0 of the last pair.
                         len = Some(llargs[idx]);
                     }
                     idx += 2;
@@ -4595,7 +4607,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                 // llargs[idx] is that pointer.
                                 if matches!(arg.mode, PassMode::Indirect { .. }) {
                                     let align = size_ty_sz.field(self.cx, 0).align.abi;
-                                    let size = bx.load(bx.type_isize(), llargs[idx], align);
+                                    let off = size_ty_sz.fields.offset(0).bytes();
+                                    let addr = if size_by_field && off != 0 {
+                                        bx.inbounds_ptradd(llargs[idx], bx.const_usize(off))
+                                    } else {
+                                        llargs[idx]
+                                    };
+                                    let size = bx.load(bx.type_isize(), addr, align);
                                     len = Some(size);
                                 }
                             }
@@ -4621,8 +4639,17 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llargs: &[Bx::Value],
         instance: Option<Instance<'tcx>>,
+        call_scope: mir::SourceScope,
     ) {
         if !self.wipe_cap_words_enabled() {
+            return;
+        }
+        // M7.2c: BTree nodes are freed by a direct `Allocator::deallocate`
+        // in btree/node.rs, not through a Box / RawVec / Rc drop, so the
+        // container-drop sites below never see them.
+        if let Some(inst) = instance
+            && self.wipe_btree_node_dealloc(bx, fn_abi, llargs, inst, call_scope)
+        {
             return;
         }
         let Some(elem_ty) = self.wipe_container_elem_ty() else {
@@ -4690,6 +4717,316 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         };
         bx.mem_fact("mem.wipe_cap_words", &[ptr, len]);
+    }
+}
+
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    /// [LLM-generated] M7.2c BTree node wipe. `BTreeMap` / `BTreeSet` nodes
+    /// are allocated with `Box::new_uninit_in` but freed with a direct
+    /// `alloc.deallocate(node.cast(), Layout::new::<LeafNode | InternalNode>())`
+    /// in `deallocate_and_ascend`, `pop_internal_level` and `do_merge`. Every
+    /// node holds a capability (the parent link), and an internal node also
+    /// holds its edge array, whose stale entries survive merges and root pops.
+    ///
+    /// The site is found by a marker, not by the caller's name: the module
+    /// `alloc::collections::btree::node` carries
+    /// `#![rustc_diagnostic_item = "cheri_btree_node"]`, and a dealloc call
+    /// matches when the function that *wrote* it lies in that module. That
+    /// function is the innermost MIR-inlined instance on the call's source
+    /// scope chain (or this function itself), so MIR inlining into another
+    /// crate or module does not hide the site. If `Allocator::deallocate`
+    /// itself was MIR-inlined, the remaining `alloc::alloc::dealloc` /
+    /// `__rust_dealloc` call still has the node.rs function on its chain.
+    /// Returns true if facts were emitted.
+    fn wipe_btree_node_dealloc(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+        inst: Instance<'tcx>,
+        call_scope: mir::SourceScope,
+    ) -> bool {
+        let tcx = self.cx.tcx();
+        if !tcx.sess.opts.unstable_opts.cheri_wipe_btree_nodes {
+            return false;
+        }
+        if !self.wipe_is_node_dealloc_callee(inst) {
+            return false;
+        }
+        // Kept out of the pre-interned symbol table so that this CHERI-only
+        // marker does not rebuild every crate that depends on rustc_span.
+        #[allow(rustc::symbol_intern_string_literal)]
+        let marker_sym = Symbol::intern("cheri_btree_node");
+        let Some(marker) = tcx.get_diagnostic_item(marker_sym) else {
+            return false;
+        };
+        let Some(origin) = self.wipe_btree_origin(call_scope, marker) else {
+            return false;
+        };
+        let Some((ptr, size)) = self.wipe_allocator_dealloc_ptr_size(bx, fn_abi, llargs) else {
+            return false;
+        };
+        match self.wipe_btree_cap_fields(origin) {
+            Some(f) => self.wipe_btree_emit_fields(bx, ptr, size, f),
+            None => bx.mem_fact("mem.wipe_cap_words", &[ptr, size]),
+        }
+        true
+    }
+
+    /// `<_ as Allocator>::deallocate`, or what is left of it after MIR
+    /// inlining: `alloc::alloc::dealloc` or the `__rust_dealloc` shim.
+    fn wipe_is_node_dealloc_callee(&self, inst: Instance<'tcx>) -> bool {
+        let tcx = self.cx.tcx();
+        if tcx.codegen_fn_attrs(inst.def_id()).flags.contains(CodegenFnAttrFlags::DEALLOCATOR) {
+            return true;
+        }
+        let Some(name) = tcx.opt_item_name(inst.def_id()) else {
+            return false;
+        };
+        let path = wipe_def_path(tcx, inst.def_id());
+        match name.as_str() {
+            "deallocate" => path.contains("Allocator"),
+            "dealloc" => path.ends_with("alloc::alloc::dealloc"),
+            "__rust_dealloc" => true,
+            _ => false,
+        }
+    }
+
+    /// The function (monomorphized) whose body holds this call as written,
+    /// if it lies in the marked module. Walks the MIR-inlined instances on
+    /// the call's scope chain from the innermost out, then this function.
+    /// The innermost one inside the marked module wins.
+    fn wipe_btree_origin(&self, call_scope: mir::SourceScope, marker: DefId) -> Option<Instance<'tcx>> {
+        let tcx = self.cx.tcx();
+        let in_marked = |did: DefId| {
+            let mut cur = Some(tcx.typeck_root_def_id(did));
+            while let Some(d) = cur {
+                if d == marker {
+                    return true;
+                }
+                if tcx.def_kind(d) == DefKind::Mod {
+                    // Nearest enclosing module only.
+                    return false;
+                }
+                cur = tcx.opt_parent(d);
+            }
+            false
+        };
+        let scopes = &self.mir.source_scopes;
+        let mut cur = Some(call_scope);
+        while let Some(sc) = cur {
+            let data = &scopes[sc];
+            if let Some((callee, _)) = data.inlined {
+                if in_marked(callee.def_id()) {
+                    return Some(self.monomorphize(callee));
+                }
+            }
+            cur = data.inlined_parent_scope;
+        }
+        in_marked(self.instance.def_id()).then_some(self.instance)
+    }
+
+    /// Cap-field geometry of this BTree's nodes when K and V hold no
+    /// capabilities: then the only capabilities in a node are the parent
+    /// link and, in an internal node, the edge array. `None` (wipe the
+    /// whole returned block) if K or V may hold capabilities or the node
+    /// types cannot be found from the origin function's `Self` type or
+    /// parameter types.
+    fn wipe_btree_cap_fields(&self, origin: Instance<'tcx>) -> Option<BTreeCapFields> {
+        let tcx = self.cx.tcx();
+        let def_id = origin.def_id();
+        let mut roots: Vec<Ty<'tcx>> = Vec::new();
+        if let Some(impl_did) = tcx.impl_of_assoc(def_id) {
+            roots.push(tcx.type_of(impl_did).instantiate(tcx, origin.args).skip_norm_wip());
+        }
+        if matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
+            let sig = tcx.fn_sig(def_id).instantiate(tcx, origin.args).skip_norm_wip();
+            let sig = tcx.instantiate_bound_regions_with_erased(sig);
+            roots.extend(sig.inputs().iter().copied());
+        }
+        let leaf = roots
+            .iter()
+            .find_map(|&t| find_adt_by_path_suffix(tcx, t, "btree::node::LeafNode", 6))?;
+        let ty::Adt(leaf_def, leaf_args) = *leaf.kind() else { return None };
+        if leaf_args.types().any(|t| ty_may_contain_caps(tcx, t)) {
+            return None;
+        }
+        let internal = find_adt_by_path_suffix(tcx, leaf, "btree::node::InternalNode", 6)?;
+        let ty::Adt(int_def, _) = *internal.kind() else { return None };
+        let field_idx = |def: ty::AdtDef<'tcx>, name: &str| {
+            def.non_enum_variant().fields.iter().position(|f| f.name.as_str() == name)
+        };
+        let leaf_l = self.cx.layout_of(leaf);
+        let int_l = self.cx.layout_of(internal);
+        let pi = field_idx(leaf_def, "parent")?;
+        let ei = field_idx(int_def, "edges")?;
+        Some(BTreeCapFields {
+            parent_off: leaf_l.fields.offset(pi).bytes(),
+            parent_size: leaf_l.field(self.cx, pi).size.bytes(),
+            leaf_size: leaf_l.size.bytes(),
+            edges_off: int_l.fields.offset(ei).bytes(),
+            edges_size: int_l.field(self.cx, ei).size.bytes(),
+            internal_size: int_l.size.bytes(),
+        })
+    }
+
+    /// Wipe the parent link always, and the edge array only when the block
+    /// is an internal node. A constant size decides at compile time; a
+    /// run-time size (`deallocate_and_ascend`) gets a branch on
+    /// `size == size_of::<InternalNode>()` around the edge fact.
+    fn wipe_btree_emit_fields(
+        &mut self,
+        bx: &mut Bx,
+        ptr: Bx::Value,
+        size: Bx::Value,
+        f: BTreeCapFields,
+    ) {
+        let at = |bx: &mut Bx, off: u64| {
+            if off == 0 { ptr } else { bx.inbounds_ptradd(ptr, bx.const_usize(off)) }
+        };
+        let parent = at(bx, f.parent_off);
+        bx.mem_fact("mem.wipe_cap_words", &[parent, bx.const_usize(f.parent_size)]);
+        match bx.const_to_opt_uint(size) {
+            Some(n) if n == f.leaf_size => {}
+            Some(n) if n == f.internal_size => {
+                wipe_btree_edges(bx, ptr, f);
+            }
+            Some(_) => bx.mem_fact("mem.wipe_cap_words", &[ptr, size]),
+            None => {
+                let is_internal =
+                    bx.icmp(IntPredicate::IntEQ, size, bx.const_usize(f.internal_size));
+                let wipe_bb = bx.append_sibling_block("btree_wipe_edges");
+                let cont_bb = bx.append_sibling_block("btree_wipe_cont");
+                bx.cond_br(is_internal, wipe_bb, cont_bb);
+                bx.switch_to_block(wipe_bb);
+                wipe_btree_edges(bx, ptr, f);
+                bx.br(cont_bb);
+                bx.switch_to_block(cont_bb);
+            }
+        }
+    }
+
+    /// `Allocator::deallocate(&self, ptr: NonNull<u8>, layout: Layout)` (also
+    /// `dealloc(ptr, layout)` and `__rust_dealloc(ptr, size, align)`): the
+    /// block pointer and the `Layout` *size*. The `Layout` scalar pair is in
+    /// memory order, which may put `align` first, so pick the `size` field
+    /// (declared field 0) by its offset.
+    fn wipe_allocator_dealloc_ptr_size(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+    ) -> Option<(Bx::Value, Bx::Value)> {
+        let tcx = self.cx.tcx();
+        let mut idx = 0usize;
+        let mut ptr: Option<Bx::Value> = None;
+        for arg in fn_abi.args.iter() {
+            let ty = arg.layout.ty;
+            match arg.mode {
+                PassMode::Ignore => continue,
+                PassMode::Pair(_, _) => {
+                    if is_layout_ty(tcx, ty) && idx + 1 < llargs.len() {
+                        let size_off = arg.layout.fields.offset(0).bytes();
+                        let v = if size_off == 0 { llargs[idx] } else { llargs[idx + 1] };
+                        return ptr.map(|p| (p, v));
+                    }
+                    idx += 2;
+                }
+                PassMode::Indirect { .. } if is_layout_ty(tcx, ty) => {
+                    if idx >= llargs.len() {
+                        return None;
+                    }
+                    let off = arg.layout.fields.offset(0).bytes();
+                    let align = arg.layout.field(self.cx, 0).align.abi;
+                    let addr = if off == 0 {
+                        llargs[idx]
+                    } else {
+                        bx.inbounds_ptradd(llargs[idx], bx.const_usize(off))
+                    };
+                    let v = bx.load(bx.type_isize(), addr, align);
+                    return ptr.map(|p| (p, v));
+                }
+                _ => {
+                    if idx >= llargs.len() {
+                        return None;
+                    }
+                    if is_ptr_or_nonnull(tcx, ty) {
+                        ptr = Some(llargs[idx]);
+                    } else if ptr.is_none() && matches!(*ty.kind(), ty::RawPtr(..)) {
+                        // `alloc::alloc::dealloc(ptr: *mut u8, layout)` and
+                        // `__rust_dealloc(ptr: *mut u8, size, align)`.
+                        ptr = Some(llargs[idx]);
+                    } else if ptr.is_some() && ty.is_integral() && !ty.is_bool() {
+                        // `__rust_dealloc(ptr, size, align)`: size first.
+                        return ptr.map(|p| (p, llargs[idx]));
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        None
+    }
+}
+
+/// [LLM-generated] M7.2c: byte geometry of a BTree's node cap fields.
+#[derive(Clone, Copy)]
+struct BTreeCapFields {
+    parent_off: u64,
+    parent_size: u64,
+    leaf_size: u64,
+    edges_off: u64,
+    edges_size: u64,
+    internal_size: u64,
+}
+
+/// [LLM-generated] M7.2c: the edge-array fact, in chunks of at most eight
+/// capability words. A chunk that small is a constant-length fact the late
+/// pass unrolls in place; one 12-word fact would become a helper call,
+/// whose caller-saved clobbers perturb register allocation in the large
+/// inlined BTree loops more than the stores themselves cost.
+fn wipe_btree_edges<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+    bx: &mut Bx,
+    ptr: Bx::Value,
+    f: BTreeCapFields,
+) {
+    // The parent link is one capability, so its size is the word size.
+    let chunk = 8 * f.parent_size.max(1);
+    let mut off = 0;
+    while off < f.edges_size {
+        let n = chunk.min(f.edges_size - off);
+        let at = f.edges_off + off;
+        let p = if at == 0 { ptr } else { bx.inbounds_ptradd(ptr, bx.const_usize(at)) };
+        bx.mem_fact("mem.wipe_cap_words", &[p, bx.const_usize(n)]);
+        off += n;
+    }
+}
+
+/// [LLM-generated] M7.2c: find an ADT whose def path ends with `suffix`
+/// inside `ty`, through fields, raw pointers and references (depth-limited).
+fn find_adt_by_path_suffix<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+    suffix: &str,
+    depth: u32,
+) -> Option<Ty<'tcx>> {
+    if depth == 0 {
+        return None;
+    }
+    match *ty.kind() {
+        ty::Adt(def, args) => {
+            if wipe_def_path(tcx, def.did()).ends_with(suffix) {
+                return Some(ty);
+            }
+            def.all_fields().find_map(|f| {
+                find_adt_by_path_suffix(tcx, f.ty(tcx, args).skip_norm_wip(), suffix, depth - 1)
+            })
+        }
+        // `NonNull<T>` holds `pattern_type!(*const T is !null)`.
+        ty::RawPtr(t, _) | ty::Ref(_, t, _) | ty::Pat(t, _) => {
+            find_adt_by_path_suffix(tcx, t, suffix, depth - 1)
+        }
+        ty::Array(t, _) | ty::Slice(t) => find_adt_by_path_suffix(tcx, t, suffix, depth - 1),
+        _ => None,
     }
 }
 

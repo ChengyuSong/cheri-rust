@@ -258,7 +258,8 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
         // M5r: pending `"mem.check"` / `"mem.free"` bundle and `!mem.last_use`.
         // M7.1d B3a: pending `mem.ffi_borrow` / `mem.ffi_retain` param attrs.
         fx.mem_ffi_prepare(bx, fn_abi, instance);
-        fx.mem_prepare_call(bx, fn_abi, llargs, instance);
+        let call_scope = fx.mir[self.bb].terminator().source_info.scope;
+        fx.mem_prepare_call(bx, fn_abi, llargs, instance, call_scope);
 
         if kind == CallKind::Tail {
             // The callee reads the by-move slot. Do not null it in the caller.

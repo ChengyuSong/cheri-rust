@@ -31,6 +31,14 @@
 //   since leaf edges are empty and need no data representation. In an internal node,
 //   an edge both identifies a position and contains a pointer to a child node.
 
+// [LLM-generated] M7.2c CHERI: marks this module for the compiler. Every
+// `Allocator::deallocate` written in this module frees a BTree node, so a
+// CHERI build may wipe the node's capability fields right before it
+// (`-Zcheri-wipe-btree-nodes`). rustc finds such a call through the MIR
+// inline scopes, so it is still recognized after MIR inlining. No effect on
+// code generation otherwise.
+#![rustc_diagnostic_item = "cheri_btree_node"]
+
 use core::marker::PhantomData;
 use core::mem::{self, MaybeUninit};
 use core::num::NonZero;
