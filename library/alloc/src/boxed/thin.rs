@@ -373,7 +373,7 @@ impl<H> WithHeader<H> {
     ///
     /// `value` must point to an undropped owned `T`, and `self` must not be
     /// accessed again after this is called.
-    unsafe fn drop<T: ?Sized>(&self, value: *mut T) {
+    #[rustc_diagnostic_item = "cheri_wipe_thin_box_drop"] unsafe fn drop<T: ?Sized>(&self, value: *mut T) {
         struct DropGuard<H> {
             ptr: NonNull<u8>,
             value_layout: Layout,

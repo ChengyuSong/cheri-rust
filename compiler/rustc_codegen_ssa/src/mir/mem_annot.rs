@@ -4664,6 +4664,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         {
             return;
         }
+        // M7.2d: `Box::map` / `try_map`, `ThinBox` and in-place collect frees,
+        // found by their `rustc_diagnostic_item` markers.
+        if let Some(inst) = instance
+            && self.wipe_alloc_hint(bx, fn_abi, llargs, inst, call_scope)
+        {
+            return;
+        }
         let Some(elem_ty) = self.wipe_container_elem_ty() else {
             return;
         };
@@ -4977,6 +4984,377 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
         }
         None
+    }
+}
+
+/// [LLM-generated] M7.2d: which marked library function a wipe hint is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WipeHint {
+    /// `Box::map` / `Box::try_map`: the old `T` block.
+    BoxMap,
+    /// `WithHeader::<H>::drop::<T>` (`ThinBox<T>` drop): the header + value block.
+    ThinBox,
+    /// `vec::in_place_collect::from_iter_in_place::<I, T>`: the dead tail before the shrink.
+    InPlace,
+}
+
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    /// [LLM-generated] M7.2d wipe hints (`-Zcheri-wipe-alloc-hints`, default on).
+    ///
+    /// Three library frees hand back a block that no container drop sees, so the
+    /// M7.2a container wipe does not run for them. The library is not changed: each
+    /// function only carries a `#[rustc_diagnostic_item]` marker, and the element type
+    /// comes from the marked function's monomorphized generic arguments, found on the
+    /// call's MIR inline scope chain (as with the BTree marker).
+    ///
+    /// * `Box::map` / `Box::try_map` (`T` = arg 0): a dealloc whose callers up to the
+    ///   marked function are only allocator plumbing (the size-changing path), or the
+    ///   drop of the `Box<MaybeUninit<U>>` (the `try_map` error / unwind path, same size
+    ///   as `T`). Wipe `(ptr, size)`.
+    /// * `WithHeader::<H>::drop::<T>` (`T` = arg 1, `H` = arg 0): a dealloc written in the
+    ///   nested `DropGuard<H>::drop` when that was MIR-inlined into the marked function
+    ///   (whole block), or else the drop of the `DropGuard<H>` itself (the value bytes
+    ///   `[guard.ptr, guard.ptr + guard.value_layout.size)`; the header is the pointee
+    ///   metadata, a `usize`, `()` or a vtable pointer into static memory).
+    /// * `from_iter_in_place::<I, T>` (`Src` = `<I as InPlaceCollect>::Src`, found through
+    ///   the marked trait): before the realloc-type call of its `Global.shrink`, wipe
+    ///   `[ptr + new, ptr + old)` with `new = old - old % size_of::<T>()`, the bytes the
+    ///   new layout drops. Those bytes held only dead `Src` values.
+    ///
+    /// Only when the old element type may hold capabilities and is not a ZST.
+    /// Returns true if facts were emitted.
+    fn wipe_alloc_hint(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+        inst: Instance<'tcx>,
+        call_scope: mir::SourceScope,
+    ) -> bool {
+        let tcx = self.cx.tcx();
+        if !tcx.sess.opts.unstable_opts.cheri_wipe_alloc_hints {
+            return false;
+        }
+        let Some((kind, origin, marker)) = self.wipe_hint_origin(call_scope) else {
+            return false;
+        };
+        match kind {
+            WipeHint::BoxMap => self.wipe_hint_box_map(bx, fn_abi, llargs, inst, origin),
+            WipeHint::ThinBox => self.wipe_hint_thin_box(bx, fn_abi, llargs, inst, origin, marker),
+            WipeHint::InPlace => self.wipe_hint_in_place(bx, fn_abi, llargs, inst, origin),
+        }
+    }
+
+    /// The marked function this call was written in, looking through allocator
+    /// plumbing only. Walks the MIR-inlined frames on the call's scope chain from the
+    /// innermost out, then this function. Each frame must be either allocator
+    /// plumbing (or, for `ThinBox`, the guard nested in the marked function), or the
+    /// marked function itself; any other frame (e.g. a user closure inlined into
+    /// `Box::map`) means the call is not the hinted free.
+    fn wipe_hint_origin(
+        &self,
+        call_scope: mir::SourceScope,
+    ) -> Option<(WipeHint, Instance<'tcx>, DefId)> {
+        let tcx = self.cx.tcx();
+        #[allow(rustc::symbol_intern_string_literal)]
+        let markers = [
+            (WipeHint::BoxMap, Symbol::intern("cheri_wipe_box_map")),
+            (WipeHint::BoxMap, Symbol::intern("cheri_wipe_box_try_map")),
+            (WipeHint::ThinBox, Symbol::intern("cheri_wipe_thin_box_drop")),
+            (WipeHint::InPlace, Symbol::intern("cheri_wipe_in_place_collect")),
+        ];
+        let markers: Vec<(WipeHint, DefId)> = markers
+            .iter()
+            .filter_map(|&(k, s)| tcx.get_diagnostic_item(s).map(|d| (k, d)))
+            .collect();
+        if markers.is_empty() {
+            return None;
+        }
+        let scopes = &self.mir.source_scopes;
+        let mut frames: Vec<Instance<'tcx>> = Vec::new();
+        let mut cur = Some(call_scope);
+        while let Some(sc) = cur {
+            let data = &scopes[sc];
+            if let Some((callee, _)) = data.inlined {
+                frames.push(self.monomorphize(callee));
+            }
+            cur = data.inlined_parent_scope;
+        }
+        frames.push(self.instance);
+        let (pos, kind, marker) = frames.iter().enumerate().find_map(|(n, f)| {
+            let ty::InstanceKind::Item(did) = f.def else { return None };
+            markers.iter().find(|&&(_, m)| m == did).map(|&(k, m)| (n, k, m))
+        })?;
+        frames[..pos]
+            .iter()
+            .all(|&f| self.wipe_hint_is_plumbing(f, kind, marker))
+            .then_some((kind, frames[pos], marker))
+    }
+
+    /// Allocator plumbing between a hinted free and its marked function: the
+    /// `alloc::alloc` / `core::alloc` functions (`Global`, `dealloc`, `realloc`, the
+    /// CHERI bounding layer) and `Allocator` / `GlobalAlloc` impls; for `Box::map`
+    /// also `<Box<MaybeUninit<_>> as Drop>::drop` and its drop glue; for `ThinBox`
+    /// also the guard nested in the marked function and its drop glue.
+    fn wipe_hint_is_plumbing(&self, f: Instance<'tcx>, kind: WipeHint, marker: DefId) -> bool {
+        let tcx = self.cx.tcx();
+        let is_box_of_uninit = |t: Ty<'tcx>| {
+            let t = match *t.kind() {
+                ty::Ref(_, t, _) | ty::RawPtr(t, _) => t,
+                _ => t,
+            };
+            if let ty::Adt(def, args) = *t.kind()
+                && tcx.lang_items().owned_box() == Some(def.did())
+                && let ty::Adt(inner, _) = *args.type_at(0).kind()
+            {
+                wipe_def_path(tcx, inner.did()).ends_with("MaybeUninit")
+            } else {
+                false
+            }
+        };
+        let nested_in_marker = |mut d: DefId| {
+            while let Some(p) = tcx.opt_parent(d) {
+                if p == marker {
+                    return true;
+                }
+                d = p;
+            }
+            false
+        };
+        if let ty::InstanceKind::Shim(ty::ShimKind::DropGlue(_, Some(dty))) = f.def {
+            return match kind {
+                WipeHint::BoxMap => is_box_of_uninit(dty),
+                WipeHint::ThinBox => {
+                    matches!(*dty.kind(), ty::Adt(def, _) if nested_in_marker(def.did()))
+                }
+                WipeHint::InPlace => false,
+            };
+        }
+        let ty::InstanceKind::Item(did) = f.def else {
+            return false;
+        };
+        let path = wipe_def_path(tcx, did);
+        if path.starts_with("alloc::alloc::")
+            || path.starts_with("<alloc::alloc::")
+            || path.starts_with("core::alloc::")
+            || path.starts_with("<core::alloc::")
+        {
+            return true;
+        }
+        if let Some(impl_did) = tcx.impl_of_assoc(did)
+            && let Some(tr) = tcx.impl_opt_trait_ref(impl_did)
+        {
+            let tr = tr.instantiate(tcx, f.args).skip_norm_wip();
+            let tp = wipe_def_path(tcx, tr.def_id);
+            if tp.ends_with("alloc::Allocator") || tp.ends_with("alloc::GlobalAlloc") {
+                return true;
+            }
+            if kind == WipeHint::BoxMap
+                && tcx.lang_items().drop_trait() == Some(tr.def_id)
+                && is_box_of_uninit(tr.self_ty())
+            {
+                return true;
+            }
+        }
+        kind == WipeHint::ThinBox && nested_in_marker(did)
+    }
+
+    /// `Allocator::deallocate`, `alloc::alloc::dealloc`, the CHERI bounding layer's
+    /// `dealloc`, or `__rust_dealloc`.
+    fn wipe_hint_is_dealloc_callee(&self, inst: Instance<'tcx>) -> bool {
+        if self.wipe_is_node_dealloc_callee(inst) {
+            return true;
+        }
+        let tcx = self.cx.tcx();
+        let Some(name) = tcx.opt_item_name(inst.def_id()) else {
+            return false;
+        };
+        name.as_str() == "dealloc" && wipe_def_path(tcx, inst.def_id()).contains("alloc::alloc::")
+    }
+
+    fn wipe_hint_box_map(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+        inst: Instance<'tcx>,
+        origin: Instance<'tcx>,
+    ) -> bool {
+        let tcx = self.cx.tcx();
+        // `impl<T, A> Box<T, A> { fn map<U, F> / fn try_map<R, F> }`.
+        let Some(t) = origin.args.types().next() else {
+            return false;
+        };
+        if !ty_may_contain_caps(tcx, t) {
+            return false;
+        }
+        let t_size = self.cx.layout_of(t).size.bytes();
+        if t_size == 0 {
+            return false;
+        }
+        if self.wipe_hint_is_dealloc_callee(inst) {
+            let Some((ptr, size)) = self.wipe_allocator_dealloc_ptr_size(bx, fn_abi, llargs) else {
+                return false;
+            };
+            bx.mem_fact("mem.wipe_cap_words", &[ptr, size]);
+            return true;
+        }
+        // The reused `Box<MaybeUninit<U>, A>` (same size as `T`) dropped on the
+        // `try_map` error path or on unwind out of `f`.
+        if let ty::InstanceKind::Shim(ty::ShimKind::DropGlue(_, Some(dty))) = inst.def
+            && let ty::Adt(def, args) = *dty.kind()
+            && tcx.lang_items().owned_box() == Some(def.did())
+            && let ty::Adt(inner, _) = *args.type_at(0).kind()
+            && wipe_def_path(tcx, inner.did()).ends_with("MaybeUninit")
+            && let Some(&slot) = llargs.first()
+        {
+            let layout = self.cx.layout_of(dty);
+            let off = layout.fields.offset(0).bytes();
+            let addr = if off == 0 { slot } else { bx.inbounds_ptradd(slot, bx.const_usize(off)) };
+            let ptr_align = layout.align.abi.restrict_for_offset(rustc_abi::Size::from_bytes(off));
+            let ptr = bx.load(bx.type_ptr(), addr, ptr_align);
+            bx.mem_fact("mem.wipe_cap_words", &[ptr, bx.const_usize(t_size)]);
+            return true;
+        }
+        false
+    }
+
+    fn wipe_hint_thin_box(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+        inst: Instance<'tcx>,
+        origin: Instance<'tcx>,
+        marker: DefId,
+    ) -> bool {
+        let tcx = self.cx.tcx();
+        // `impl<H> WithHeader<H> { unsafe fn drop<T: ?Sized>(&self, value: *mut T) }`.
+        let mut tys = origin.args.types();
+        let (Some(h), Some(t)) = (tys.next(), tys.next()) else {
+            return false;
+        };
+        if !ty_may_contain_caps(tcx, t) && !ty_may_contain_caps(tcx, h) {
+            return false;
+        }
+        if self.wipe_hint_is_dealloc_callee(inst) {
+            // The guard's `alloc::dealloc(ptr - value_offset, layout)`, MIR-inlined
+            // into the marked function: the whole block.
+            let Some((ptr, size)) = self.wipe_allocator_dealloc_ptr_size(bx, fn_abi, llargs) else {
+                return false;
+            };
+            bx.mem_fact("mem.wipe_cap_words", &[ptr, size]);
+            return true;
+        }
+        // The guard was not inlined: its drop glue is called from the marked function.
+        let ty::InstanceKind::Shim(ty::ShimKind::DropGlue(_, Some(dty))) = inst.def else {
+            return false;
+        };
+        let ty::Adt(def, _) = *dty.kind() else {
+            return false;
+        };
+        if tcx.opt_parent(def.did()) != Some(marker) {
+            return false;
+        }
+        let Some(&slot) = llargs.first() else {
+            return false;
+        };
+        let field_idx = |name: &str| {
+            def.non_enum_variant().fields.iter().position(|f| f.name.as_str() == name)
+        };
+        let (Some(pi), Some(li)) = (field_idx("ptr"), field_idx("value_layout")) else {
+            return false;
+        };
+        let g = self.cx.layout_of(dty);
+        let lay_ty = g.field(self.cx, li).ty;
+        let ty::Adt(lay_def, _) = *lay_ty.kind() else {
+            return false;
+        };
+        let Some(si) =
+            lay_def.non_enum_variant().fields.iter().position(|f| f.name.as_str() == "size")
+        else {
+            return false;
+        };
+        let lay = self.cx.layout_of(lay_ty);
+        let ptr_off = g.fields.offset(pi).bytes();
+        let size_off = g.fields.offset(li).bytes() + lay.fields.offset(si).bytes();
+        let at = |bx: &mut Bx, off: u64| {
+            if off == 0 { slot } else { bx.inbounds_ptradd(slot, bx.const_usize(off)) }
+        };
+        let pa = at(bx, ptr_off);
+        let ptr_align = g.align.abi.restrict_for_offset(rustc_abi::Size::from_bytes(ptr_off));
+        let ptr = bx.load(bx.type_ptr(), pa, ptr_align);
+        let sa = at(bx, size_off);
+        let size_align = g.align.abi.restrict_for_offset(rustc_abi::Size::from_bytes(size_off));
+        let size = bx.load(bx.type_isize(), sa, size_align);
+        bx.mem_fact("mem.wipe_cap_words", &[ptr, size]);
+        true
+    }
+
+    fn wipe_hint_in_place(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llargs: &[Bx::Value],
+        inst: Instance<'tcx>,
+        origin: Instance<'tcx>,
+    ) -> bool {
+        let tcx = self.cx.tcx();
+        // Realloc-type calls only: `Allocator::shrink`, `Global::shrink_impl{,_runtime}`,
+        // `realloc{,_nonnull}`, the bounding layer's `resize` / `realloc`, `__rust_realloc`.
+        let Some(name) = tcx.opt_item_name(inst.def_id()) else {
+            return false;
+        };
+        let path = wipe_def_path(tcx, inst.def_id());
+        let is_realloc = match name.as_str() {
+            "shrink" => path.contains("Allocator"),
+            "shrink_impl" | "shrink_impl_runtime" | "realloc_nonnull" | "resize" => {
+                path.contains("alloc::alloc::")
+            }
+            "realloc" => path.contains("alloc::alloc::") || path.contains("GlobalAlloc"),
+            "__rust_realloc" => true,
+            _ => false,
+        };
+        if !is_realloc {
+            return false;
+        }
+        // `fn from_iter_in_place<I, T>`; `Src` is `<I as InPlaceCollect>::Src`.
+        let mut tys = origin.args.types();
+        let (Some(i), Some(t)) = (tys.next(), tys.next()) else {
+            return false;
+        };
+        #[allow(rustc::symbol_intern_string_literal)]
+        let trait_sym = Symbol::intern("cheri_wipe_in_place_collect_trait");
+        let Some(tr) = tcx.get_diagnostic_item(trait_sym) else {
+            return false;
+        };
+        #[allow(rustc::symbol_intern_string_literal)]
+        let src_sym = Symbol::intern("Src");
+        let Some(src_item) = tcx.associated_items(tr).filter_by_name_unhygienic(src_sym).next()
+        else {
+            return false;
+        };
+        let proj = Ty::new_projection(tcx, ty::IsRigid::No, src_item.def_id, [i]);
+        let Ok(src) =
+            tcx.try_normalize_erasing_regions(self.cx.typing_env(), ty::Unnormalized::new(proj))
+        else {
+            return false;
+        };
+        if !ty_may_contain_caps(tcx, src) {
+            return false;
+        }
+        let t_size = self.cx.layout_of(t).size.bytes();
+        if t_size == 0 || self.cx.layout_of(src).size.bytes() == 0 {
+            return false;
+        }
+        let Some((ptr, old)) = self.wipe_allocator_dealloc_ptr_size(bx, fn_abi, llargs) else {
+            return false;
+        };
+        let rem = bx.urem(old, bx.const_usize(t_size));
+        let new = bx.sub(old, rem);
+        let start = bx.inbounds_ptradd(ptr, new);
+        bx.mem_fact("mem.wipe_cap_words", &[start, rem]);
+        true
     }
 }
 

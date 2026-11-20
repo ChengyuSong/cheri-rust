@@ -704,7 +704,7 @@ impl<T, A: Allocator> Box<T, A> {
     /// assert_eq!(*new, 14);
     /// ```
     #[cfg(not(no_global_oom_handling))]
-    #[stable(feature = "smart_pointer_map", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "smart_pointer_map", since = "CURRENT_RUSTC_VERSION")] #[rustc_diagnostic_item = "cheri_wipe_box_map"]
     pub fn map<U>(this: Self, f: impl FnOnce(T) -> U) -> Box<U, A> {
         let (value, allocation) = Box::take(this);
         let (raw, alloc) = Box::into_non_null_with_allocator(allocation);
@@ -742,7 +742,7 @@ impl<T, A: Allocator> Box<T, A> {
     /// assert_eq!(*new, 7);
     /// ```
     #[cfg(not(no_global_oom_handling))]
-    #[unstable(feature = "smart_pointer_try_map", issue = "144419")]
+    #[unstable(feature = "smart_pointer_try_map", issue = "144419")] #[rustc_diagnostic_item = "cheri_wipe_box_try_map"]
     pub fn try_map<R>(
         this: Self,
         f: impl FnOnce(T) -> R,

@@ -2476,6 +2476,16 @@ options! {
         passed to `deallocate` (default: yes; `no` emits nothing and is \
         byte-identical to the merged trees; also needs `-Zcheri-wipe-cap-words` and \
         `-Zcheri-annotate`)"),
+    cheri_wipe_alloc_hints: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2d wipe hints: emit `mem.wipe_cap_words` for three library \
+        frees that no container drop covers, found by `rustc_diagnostic_item` markers and \
+        the MIR inline scopes (no library code changes): the old block of `Box::map` / \
+        `Box::try_map` (dealloc, or the `Box<MaybeUninit<U>>` dropped on the error path), \
+        the `ThinBox` block (dealloc in the `WithHeader::drop` guard, or the guard drop), \
+        and the dead tail of an in-place `collect` before its shrink. Only when the old \
+        element type may hold capabilities (default: yes; `no` emits nothing and is \
+        byte-identical to the merged trees; also needs `-Zcheri-wipe-cap-words` and \
+        `-Zcheri-annotate`)"),
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),
