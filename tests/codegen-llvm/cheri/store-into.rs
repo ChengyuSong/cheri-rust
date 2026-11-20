@@ -181,6 +181,26 @@ pub unsafe fn write_volatile_static_field(b: &u64) {
     core::hint::black_box(&raw const STATIC_HOLD);
 }
 
+static mut STATIC_WORD: u64 = 0;
+
+// B2b-2: write_volatile of an integer into a named static (HTIF tohost /
+// fromhost) is not a capability store and must not emit (an i64 operand
+// fails the IR verifier). [LLM-generated]
+// on-LABEL: @write_volatile_static_int(
+// on-NOT: "mem.store_into"
+// on: ret
+// off-LABEL: @write_volatile_static_int(
+// off-NOT: "mem.store_into"
+// off: ret
+// onO2-LABEL: @write_volatile_static_int(
+// onO2-NOT: "mem.store_into"
+// onO2: ret
+#[no_mangle]
+pub unsafe fn write_volatile_static_int(v: u64) {
+    ptr::write_volatile(&raw mut STATIC_WORD, v);
+    ptr::write_volatile(&raw mut STATIC_WORD, 0);
+}
+
 // B2b-2: write_volatile into a local must not emit (trackb u0).
 // on-LABEL: @write_volatile_local(
 // on-NOT: "mem.store_into"
