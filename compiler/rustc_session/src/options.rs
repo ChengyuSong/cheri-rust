@@ -2481,7 +2481,8 @@ options! {
     cheri_wipe_alloc_hints: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2d wipe hints: emit `mem.wipe_cap_words` for three library \
         frees that no container drop covers, found by the library's `rustc_cheri_spec` \
-        attributes (M7.2e; was `rustc_diagnostic_item` markers) and the MIR inline scopes: the old block of `Box::map` / \
+        attributes (M7.2e; was `rustc_diagnostic_item` markers) and \
+        the MIR inline scopes (no library code changes): the old block of `Box::map` / \
         `Box::try_map` (dealloc, or the `Box<MaybeUninit<U>>` dropped on the error path), \
         the `ThinBox` block (dealloc in the `WithHeader::drop` guard, or the guard drop), \
         and the dead part of an in-place `collect` block before its shrink (and the \

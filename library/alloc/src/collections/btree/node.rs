@@ -31,13 +31,13 @@
 //   since leaf edges are empty and need no data representation. In an internal node,
 //   an edge both identifies a position and contains a pointer to a child node.
 
-// [LLM-generated] M7.2c/M7.2e CHERI: the node frees in this module carry
-// `#[rustc_cheri_spec = "dealloc_of(..., fields)"]`: a CHERI build may wipe
-// the freed node's capability fields (the parent link and, for an internal
-// node, the edge array) right before `Allocator::deallocate`
-// (`-Zcheri-wipe-btree-nodes`). rustc finds the free through the MIR inline
-// scopes, so it is still recognized after MIR inlining. No effect on code
-// generation otherwise.
+// [LLM-generated] M7.2c CHERI: the node frees in this module are marked for the compiler. Every
+// `Allocator::deallocate` written in this module frees a BTree node, so a
+// CHERI build may wipe the node's capability fields right before it
+// (`-Zcheri-wipe-btree-nodes`). rustc finds such a call through the MIR
+// inline scopes, so it is still recognized after MIR inlining. No effect on
+// code generation otherwise.
+// M7.2e: marked by `#[rustc_cheri_spec = "dealloc_of(.., fields)"]` on the freeing functions.
 
 use core::marker::PhantomData;
 use core::mem::{self, MaybeUninit};
