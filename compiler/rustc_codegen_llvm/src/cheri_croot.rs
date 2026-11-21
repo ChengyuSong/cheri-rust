@@ -92,7 +92,9 @@ fn is_write_callee(tcx: TyCtxt<'_>, expr: &Expr<'_>) -> bool {
     let Res::Def(_, def_id) = path.res else {
         return false;
     };
-    let s = tcx.def_path_str(def_id);
+    // [LLM-generated] Not the trimmed form: trimmed paths may only be computed when a
+    // diagnostic is emitted, and a clean build would ICE at session end.
+    let s = rustc_middle::ty::print::with_no_trimmed_paths!(tcx.def_path_str(def_id));
     let name = s.rsplit("::").next().unwrap_or("");
     // Match the last path segment only. `def_path_str` may be
     // `ptr::write_volatile`, `core::ptr::write_volatile`, or a crate-disambiguated
@@ -193,7 +195,7 @@ fn collect_croot_statics(tcx: TyCtxt<'_>) -> Vec<DefId> {
             out.push(def_id);
         }
     }
-    out.sort_by_cached_key(|d| tcx.def_path_str(*d));
+    out.sort_by_cached_key(|d| rustc_middle::ty::print::with_no_trimmed_paths!(tcx.def_path_str(*d)));
     out
 }
 
