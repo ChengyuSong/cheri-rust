@@ -704,7 +704,7 @@ impl<T, A: Allocator> Box<T, A> {
     /// assert_eq!(*new, 14);
     /// ```
     #[cfg(not(no_global_oom_handling))]
-    #[stable(feature = "smart_pointer_map", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "smart_pointer_map", since = "CURRENT_RUSTC_VERSION")] #[rustc_cheri_spec = "dealloc_of(ty = T)"]
     pub fn map<U>(this: Self, f: impl FnOnce(T) -> U) -> Box<U, A> {
         let (value, allocation) = Box::take(this);
         let (raw, alloc) = Box::into_non_null_with_allocator(allocation);
@@ -742,7 +742,7 @@ impl<T, A: Allocator> Box<T, A> {
     /// assert_eq!(*new, 7);
     /// ```
     #[cfg(not(no_global_oom_handling))]
-    #[unstable(feature = "smart_pointer_try_map", issue = "144419")]
+    #[unstable(feature = "smart_pointer_try_map", issue = "144419")] #[rustc_cheri_spec = "dealloc_of(ty = T)"]
     pub fn try_map<R>(
         this: Self,
         f: impl FnOnce(T) -> R,
@@ -1987,7 +1987,7 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
 #[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<#[may_dangle] T: ?Sized, A: Allocator> Drop for Box<T, A> {
     #[inline]
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.0)"] #[rustc_cheri_spec = "frees(block = self.0, size = size_of_val(*self.0))"] fn drop(&mut self) {
         // the T in the Box is dropped by the compiler before the destructor is run
 
         let ptr = self.0;

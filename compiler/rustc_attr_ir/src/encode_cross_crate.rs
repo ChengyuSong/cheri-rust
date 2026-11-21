@@ -130,6 +130,7 @@ impl AttributeKind {
             RustcDeprecatedSafe2024 { .. } => Yes,
             RustcDiagnosticItem(..) => Yes,
             RustcMemContract(..) => Yes,
+            RustcCheriSpec(..) => Yes,
             RustcMemContractSite(..) => No, // local site only
             RustcDoNotConstCheck => Yes,
             RustcDocPrimitive(..) => Yes,

@@ -1271,6 +1271,10 @@ pub enum AttributeKind {
     RustcMemContract(ThinVec<Symbol>),
     /// CHERI M3.5: block/statement-level type contract site.
     RustcMemContractSite(ThinVec<Symbol>),
+    /// [LLM-generated] CHERI M7.2e: `#[rustc_cheri_spec = "..."]` on a function, foreign
+    /// function, trait method or `let` statement. Each entry is one spec string and the span
+    /// of its literal; `rustc_middle::ty::cheri_spec` parses and checks it.
+    RustcCheriSpec(ThinVec<(Symbol, Span)>),
 
     /// Represents `#[rustc_do_not_const_check]`
     RustcDoNotConstCheck,

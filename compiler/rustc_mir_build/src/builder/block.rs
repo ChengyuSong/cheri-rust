@@ -265,6 +265,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     // Evaluate the initializer, if present.
                     let lint_level = LintLevel::Explicit(*hir_id);
                     if let Some(init) = *initializer {
+                        // [LLM-generated] CHERI M7.2e: `live` statement specs.
+                        this.cheri_note_live(*hir_id, init);
                         let initializer_span = this.thir[init].span;
                         let scope = (*init_scope, source_info);
 

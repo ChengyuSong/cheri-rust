@@ -194,6 +194,11 @@ macro_rules! make_mir_visitor {
                             self.visit_operand(count, location);
                         }
                         NonDivergingIntrinsic::LoanEnd(_) | NonDivergingIntrinsic::LoanStart(..) => {}
+                        NonDivergingIntrinsic::CheriSpec(ops) => {
+                            for op in ops {
+                                self.visit_operand(op, location);
+                            }
+                        }
                     },
                     StatementKind::ConstEvalCounter | StatementKind::Nop => {}
                 }

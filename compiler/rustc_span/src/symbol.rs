@@ -1883,6 +1883,7 @@ symbols! {
         rustc_lint_untracked_query_information,
         rustc_macro_transparency,
         rustc_main,
+        rustc_cheri_spec,
         rustc_mem_contract,
         rustc_mem_contract_site,
         rustc_mir,

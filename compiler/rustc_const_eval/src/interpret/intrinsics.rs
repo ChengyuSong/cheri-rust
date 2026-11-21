@@ -989,6 +989,14 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 self.copy_intrinsic(&src, &dst, &count, /* nonoverlapping */ true)
             }
             NonDivergingIntrinsic::LoanEnd(_) | NonDivergingIntrinsic::LoanStart(..) => interp_ok(()),
+            // [LLM-generated] CHERI M7.2e: a dead-range wipe has no effect on execution; the
+            // substituted relocation copy is only built for CHERI codegen.
+            NonDivergingIntrinsic::CheriSpec(spec) => match **spec {
+                mir::CheriSpecStmt::WipeDead { .. } => interp_ok(()),
+                mir::CheriSpecStmt::Relocated { .. } => {
+                    rustc_middle::throw_unsup_format!("CHERI spec relocation is not supported by the interpreter")
+                }
+            },
         }
     }
 

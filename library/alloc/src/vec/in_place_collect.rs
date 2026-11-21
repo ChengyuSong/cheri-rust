@@ -322,7 +322,7 @@ where
             let dst_size = size_of::<T>().unchecked_mul(dst_cap);
             let new_layout = Layout::from_size_align_unchecked(dst_size, dst_align);
 
-            let result = alloc.shrink(dst_buf.cast(), old_layout, new_layout);
+            #[rustc_cheri_spec = "live(block = dst_buf, bytes = len * size_of::<T>(), held = *src_buf, ty = T)"] let result = alloc.shrink(dst_buf.cast(), old_layout, new_layout);
             let Ok(reallocated) = result else { handle_alloc_error(new_layout) };
             dst_buf = reallocated.cast::<T>();
         }

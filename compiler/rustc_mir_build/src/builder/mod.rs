@@ -229,6 +229,9 @@ struct Builder<'a, 'tcx> {
     /// Collects additional coverage information during MIR building.
     /// Only present if coverage is enabled and this function is eligible.
     coverage_info: Option<coverageinfo::CoverageInfoBuilder>,
+
+    /// [LLM-generated] CHERI M7.2e: `live` statement specs waiting for their call.
+    cheri_live: FxHashMap<ExprId, cheri_spec::PendingLive<'tcx>>,
 }
 
 type CaptureMap<'tcx> = SortedIndexMultiMap<usize, ItemLocalId, Capture<'tcx>>;
@@ -812,6 +815,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             var_debug_info: vec![],
             lint_level_roots_cache: GrowableBitSet::new_empty(),
             coverage_info: coverageinfo::CoverageInfoBuilder::new_if_enabled(tcx, def),
+            cheri_live: Default::default(),
         };
 
         assert_eq!(builder.cfg.start_new_block(), START_BLOCK);
@@ -1175,6 +1179,7 @@ pub(crate) fn parse_float_into_scalar(
 
 mod block;
 mod cfg;
+mod cheri_spec;
 mod coverageinfo;
 mod custom;
 mod expr;

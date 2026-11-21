@@ -25,11 +25,11 @@ unsafe extern "Rust" {
     #[rustc_deallocator]
     #[rustc_nounwind]
     #[rustc_std_internal_symbol]
-    fn __rust_dealloc(ptr: NonNull<u8>, size: usize, align: Alignment);
+    #[rustc_cheri_spec = "frees(block = ptr, size = size)"] fn __rust_dealloc(ptr: NonNull<u8>, size: usize, align: Alignment);
     #[rustc_reallocator]
     #[rustc_nounwind]
     #[rustc_std_internal_symbol]
-    fn __rust_realloc(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_size, keep = new_size)"] fn __rust_realloc(
         ptr: NonNull<u8>,
         old_size: usize,
         align: Alignment,
@@ -197,7 +197,7 @@ pub unsafe fn alloc(layout: Layout) -> *mut u8 {
 #[stable(feature = "global_alloc", since = "1.28.0")]
 #[inline]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
+#[rustc_cheri_spec = "frees(block = ptr, size = layout.size)"] pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
     // SAFETY: Upheld by caller.
     unsafe { dealloc_nonnull(NonNull::new_unchecked(ptr), layout) }
 }
@@ -205,7 +205,7 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
 /// Same as [`dealloc`] but when you already have a non-null pointer
 #[inline]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-unsafe fn dealloc_nonnull(ptr: NonNull<u8>, layout: Layout) {
+#[rustc_cheri_spec = "frees(block = ptr, size = layout.size)"] unsafe fn dealloc_nonnull(ptr: NonNull<u8>, layout: Layout) {
     // On CHERI purecap, `alloc` asked the global allocator for the padded layout.
     #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
     let (size, align) = cheri_heap::padded(layout.size(), layout.alignment());
@@ -257,7 +257,7 @@ unsafe fn dealloc_nonnull(ptr: NonNull<u8>, layout: Layout) {
 #[must_use = "losing the pointer will leak memory"]
 #[inline]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+#[rustc_cheri_spec = "relocates(block = ptr, size = layout.size, keep = new_size)"] pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
     // SAFETY: Upheld by caller.
     unsafe { realloc_nonnull(NonNull::new_unchecked(ptr), layout, new_size) }
 }
@@ -265,7 +265,7 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
 /// Same as [`realloc`] but when you already have a non-null pointer
 #[inline]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-unsafe fn realloc_nonnull(ptr: NonNull<u8>, layout: Layout, new_size: usize) -> *mut u8 {
+#[rustc_cheri_spec = "relocates(block = ptr, size = layout.size, keep = new_size)"] unsafe fn realloc_nonnull(ptr: NonNull<u8>, layout: Layout, new_size: usize) -> *mut u8 {
     // SAFETY: Upheld by caller.
     // SAFETY: Upheld by caller.
     #[cfg(all(target_family = "cheri", target_abi = "purecap", not(cheri_no_heap_bounds)))]
@@ -409,9 +409,9 @@ mod cheri_heap {
     /// The allocator under the bounding layer, in padded sizes.
     pub(super) trait Inner {
         unsafe fn alloc(&self, len: usize, align: Alignment) -> *mut u8;
-        unsafe fn realloc(&self, p: *mut u8, len: usize, align: Alignment, new_len: usize)
+        #[rustc_cheri_spec = "relocates(block = p, size = len, keep = new_len)"] unsafe fn realloc(&self, p: *mut u8, len: usize, align: Alignment, new_len: usize)
         -> *mut u8;
-        unsafe fn dealloc(&self, p: *mut u8, len: usize, align: Alignment);
+        #[rustc_cheri_spec = "frees(block = p, size = len)"] unsafe fn dealloc(&self, p: *mut u8, len: usize, align: Alignment);
         /// The widest capability this layer can get for the block at `p`'s address
         /// (`CheriBoundedAlloc::with_root`); `p` itself if there is none.
         fn widen(&self, p: *mut u8) -> *mut u8 {
@@ -460,7 +460,7 @@ mod cheri_heap {
     ///    capability came back, the block is moved instead.
     /// 3. Otherwise (stricter alignment needed): allocate, copy and free.
     #[inline]
-    pub(super) unsafe fn resize<I: Inner + ?Sized>(
+    #[rustc_cheri_spec = "relocates(block = p, size = layout.size, keep = new_size)"] pub(super) unsafe fn resize<I: Inner + ?Sized>(
         inner: &I,
         p: *mut u8,
         layout: Layout,
@@ -669,7 +669,7 @@ impl Global {
 
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-    fn deallocate_impl_runtime(ptr: NonNull<u8>, layout: Layout) {
+    #[rustc_cheri_spec = "frees(block = ptr, size = layout.size)"] fn deallocate_impl_runtime(ptr: NonNull<u8>, layout: Layout) {
         if layout.size() != 0 {
             // SAFETY:
             // * We have checked that `layout` is non-zero in size.
@@ -686,7 +686,7 @@ impl Global {
     // SAFETY: Same as `Allocator::grow`
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-    fn grow_impl_runtime(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = old_layout.size)"] fn grow_impl_runtime(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
@@ -734,7 +734,7 @@ impl Global {
     // SAFETY: Same as `Allocator::grow`
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-    fn shrink_impl_runtime(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = new_layout.size)"] fn shrink_impl_runtime(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
@@ -793,7 +793,7 @@ impl Global {
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
-    const unsafe fn deallocate_impl(&self, ptr: NonNull<u8>, layout: Layout) {
+    #[rustc_cheri_spec = "frees(block = ptr, size = layout.size)"] const unsafe fn deallocate_impl(&self, ptr: NonNull<u8>, layout: Layout) {
         core::intrinsics::const_eval_select(
             (ptr, layout),
             Global::deallocate_impl_const,
@@ -805,7 +805,7 @@ impl Global {
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
-    const unsafe fn grow_impl(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = old_layout.size)"] const unsafe fn grow_impl(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
@@ -823,7 +823,7 @@ impl Global {
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
-    const unsafe fn shrink_impl(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = new_layout.size)"] const unsafe fn shrink_impl(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
@@ -858,7 +858,7 @@ impl Global {
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
-    const fn deallocate_impl_const(ptr: NonNull<u8>, layout: Layout) {
+    #[rustc_cheri_spec = "frees(block = ptr, size = layout.size)"] const fn deallocate_impl_const(ptr: NonNull<u8>, layout: Layout) {
         if layout.size() != 0 {
             // SAFETY: We checked for nonzero size; other preconditions must be upheld by caller.
             unsafe {
@@ -870,7 +870,7 @@ impl Global {
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
-    const fn grow_shrink_impl_const(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = new_layout.size)"] const fn grow_shrink_impl_const(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,

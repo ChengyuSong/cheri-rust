@@ -519,6 +519,8 @@ pub enum NonDivergingIntrinsic {
     LoanEnd(u64),
     /// [LLM-generated] CHERI M5r R6: start of a borrowck loan (no effect on execution).
     LoanStart(u64),
+    /// [LLM-generated] CHERI M7.2e: a lowered `rustc_cheri_spec` statement; its operands.
+    CheriSpec(Vec<Operand>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

@@ -1,0 +1,86 @@
+error: malformed `rustc_cheri_spec`: expected `,`
+  --> $DIR/spec-wf-fn.rs:36:22
+   |
+LL | #[rustc_cheri_spec = "frees(block = ptr"]
+   |                      ^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: unknown spec `wipes`; expected one of `frees`, `dealloc_of`, `relocates`, `live`, `retains`, `borrows`, `stores`
+  --> $DIR/spec-wf-fn.rs:40:22
+   |
+LL | #[rustc_cheri_spec = "wipes(block = ptr, size = 8)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: `or = ...` needs `fields`
+  --> $DIR/spec-wf-fn.rs:44:22
+   |
+LL | #[rustc_cheri_spec = "dealloc_of(ty = T, or = T)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: unknown key `colour` in `frees`
+  --> $DIR/spec-wf-fn.rs:48:22
+   |
+LL | #[rustc_cheri_spec = "frees(block = ptr, size = 8, colour = 1)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: unexpected `ptr` in `frees`
+  --> $DIR/spec-wf-fn.rs:52:22
+   |
+LL | #[rustc_cheri_spec = "frees(ptr, size = 8)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: no parameter or local named `q`
+  --> $DIR/spec-wf-fn.rs:56:22
+   |
+LL | #[rustc_cheri_spec = "frees(block = q, size = 8)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `ptr` has type `*mut u8`, not an integer
+  --> $DIR/spec-wf-fn.rs:60:22
+   |
+LL | #[rustc_cheri_spec = "frees(block = ptr, size = ptr)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `block = n`: `usize` is not a pointer
+  --> $DIR/spec-wf-fn.rs:64:22
+   |
+LL | #[rustc_cheri_spec = "frees(block = n, size = 8)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `alloc = ...` / `free = ...` are only allowed on a trait method
+  --> $DIR/spec-wf-fn.rs:68:22
+   |
+LL | #[rustc_cheri_spec = "relocates(block = ptr, size = old.size, keep = new.size, alloc = allocate(new), free = deallocate(ptr, old))"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `live` is a statement spec; put it on the `let` of the call
+  --> $DIR/spec-wf-fn.rs:72:22
+   |
+LL | #[rustc_cheri_spec = "live(block = ptr, bytes = 0, held = *ptr)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `u64` is not a generic type parameter or `Self` here
+  --> $DIR/spec-wf-fn.rs:77:22
+   |
+LL | #[rustc_cheri_spec = "dealloc_of(ty = u64)"]
+   |                      ^^^^^^^^^^^^^^^^^^^^^^
+
+error: `rustc_cheri_spec`: `frees` is a function spec; only `live` may be put on a statement
+  --> $DIR/spec-wf-fn.rs:82:26
+   |
+LL |     #[rustc_cheri_spec = "frees(block = ptr, size = 8)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: no field `nope` on type `Buf<T>`
+  --> $DIR/spec-wf-fn.rs:27:26
+   |
+LL |     #[rustc_cheri_spec = "frees(block = self.nope, size = self.cap)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `U` is not a generic type parameter or `Self` here
+  --> $DIR/spec-wf-fn.rs:31:26
+   |
+LL |     #[rustc_cheri_spec = "dealloc_of(ty = U)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 14 previous errors
+

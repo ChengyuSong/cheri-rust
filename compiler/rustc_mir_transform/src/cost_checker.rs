@@ -89,6 +89,8 @@ impl<'tcx> Visitor<'tcx> for CostChecker<'_, 'tcx> {
                     NonDivergingIntrinsic::CopyNonOverlapping(..) => CALL_PENALTY,
                     // [LLM-generated] M5r D17: a marker only; must not change inlining.
                     NonDivergingIntrinsic::LoanEnd(..) | NonDivergingIntrinsic::LoanStart(..) => 0,
+                    // [LLM-generated] CHERI M7.2e: spec annotations must not change inlining.
+                    NonDivergingIntrinsic::CheriSpec(..) => 0,
                 };
             }
             StatementKind::Assign(..) => self.penalty += INSTR_COST,

@@ -924,6 +924,7 @@ impl Display for NonDivergingIntrinsic<'_> {
             }
             Self::LoanEnd(id) => write!(f, "loan_end({id:#x})"),
             Self::LoanStart(id, l) => write!(f, "loan_start({id:#x}, {l:?})"),
+            Self::CheriSpec(spec) => write!(f, "cheri_spec({spec:?})"),
         }
     }
 }

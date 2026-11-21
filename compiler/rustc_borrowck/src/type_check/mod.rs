@@ -722,6 +722,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
             }
             StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(..))
             | StatementKind::Intrinsic(NonDivergingIntrinsic::LoanEnd(..) | NonDivergingIntrinsic::LoanStart(..))
+            | StatementKind::Intrinsic(NonDivergingIntrinsic::CheriSpec(..))
             | StatementKind::FakeRead(..)
             | StatementKind::StorageLive(..)
             | StatementKind::StorageDead(..)
