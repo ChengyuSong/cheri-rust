@@ -373,7 +373,7 @@ impl<H> WithHeader<H> {
     ///
     /// `value` must point to an undropped owned `T`, and `self` must not be
     /// accessed again after this is called.
-    #[rustc_diagnostic_item = "cheri_wipe_thin_box_drop"] unsafe fn drop<T: ?Sized>(&self, value: *mut T) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T)"] unsafe fn drop<T: ?Sized>(&self, value: *mut T) {
         struct DropGuard<H> {
             ptr: NonNull<u8>,
             value_layout: Layout,
@@ -381,7 +381,7 @@ impl<H> WithHeader<H> {
         }
 
         impl<H> Drop for DropGuard<H> {
-            fn drop(&mut self) {
+            #[rustc_cheri_spec = "frees(block = self.ptr, size = self.value_layout.size)"] fn drop(&mut self) {
                 // All ZST are allocated statically.
                 if self.value_layout.size() == 0 {
                     return;

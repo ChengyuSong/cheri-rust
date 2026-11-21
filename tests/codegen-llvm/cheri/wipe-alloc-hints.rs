@@ -1,28 +1,34 @@
 // M7.2d wipe hints [LLM-generated]: three library frees that no container
-// drop covers get `mem.wipe_cap_words` facts without any library code change.
-// The library functions only carry `#[rustc_diagnostic_item]` markers
-// (`cheri_wipe_box_map`, `cheri_wipe_box_try_map`, `cheri_wipe_thin_box_drop`,
-// `cheri_wipe_in_place_collect` and the `InPlaceCollect` trait); rustc finds
-// the marked function on the call's MIR inline scope chain and takes the old
-// element type from its generic arguments.
+// drop covers get `mem.wipe_cap_words` facts.
+// M7.2e: the library now carries `#[rustc_cheri_spec]` attributes instead of the
+// `rustc_diagnostic_item` markers: `dealloc_of(ty = T)` on `Box::map` /
+// `Box::try_map` / `WithHeader::drop`, a `frees` spec on the ThinBox `DropGuard`
+// drop, and a `live(..)` statement spec on the in-place `collect` shrink.
 // * `Box::map`: before the old block's `deallocate` (size changed).
 // * `Box::try_map` error path: before the drop of the reused
 //   `Box<MaybeUninit<U>>` (same size as `T`; `U` holds no caps here).
 // * `ThinBox<T>` drop: before the drop of the `WithHeader::drop` guard
 //   (value bytes, read from the guard's `ptr` / `value_layout.size`).
-// * in-place `collect`: before `Global::shrink_impl_runtime`, the bytes the
-//   new layout drops, `[old - old % size_of::<T>(), old)`.
-// Only when the old element type may hold capabilities (`Plain` / `PSrc` get
+// * in-place `collect`: before the shrink, the bytes past the live elements,
+//   `[len * size_of::<U>(), old)` (`WipeDead`), if the old element type may hold
+//   capabilities. If the new element type may hold capabilities, the shrink is
+//   replaced (MIR branch on `cheri_ty_may_contain_caps::<U>()`) by allocate +
+//   copy + wipe of the whole old block + free (`Relocated`), so a block the
+//   allocator would move keeps no capability.
+// Only when the element types may hold capabilities (`Plain` / `PSrc` get
 // nothing). `-Zcheri-wipe-alloc-hints=no` (or `-Zcheri-wipe-cap-words=no`)
-// emits none of these; the RawVec<Src2> drop fact in the M7.2a container
-// hook stays (and goes with `-Zcheri-wipe-cap-words=no`).
+// emits none of these; `-Zcheri-spec-relocate-rewrite=no` drops the rewrite's
+// wipe (the MIR branch itself follows the flags the library was built with).
+// The RawVec drop facts (`dealloc_of` on `RawVec::drop`) stay (and go with
+// `-Zcheri-wipe-cap-words=no`).
 //
-//@ revisions: o0 mir off offall
+//@ revisions: o0 mir off offall rwoff
 //@ compile-flags: -Cdebuginfo=0
 //@[o0] compile-flags: -Copt-level=0
 //@[mir] compile-flags: -Copt-level=2 -Cno-prepopulate-passes
 //@[off] compile-flags: -Copt-level=0 -Zcheri-wipe-alloc-hints=no
 //@[offall] compile-flags: -Copt-level=0 -Zcheri-wipe-cap-words=no
+//@[rwoff] compile-flags: -Copt-level=0 -Zcheri-spec-relocate-rewrite=no
 //@ only-riscv64cheri-unknown-none-purecap
 
 #![crate_type = "lib"]
@@ -46,6 +52,10 @@ pub struct Dst2([u64; 4]);
 pub struct PSrc { a: u64, b: u64, c: u64 }
 #[repr(C, align(16))]
 pub struct PDst([u64; 2]);
+#[repr(C)]
+pub struct Src4 { a: u64, b: u64, p: &'static u64, c: u64, d: u64 }
+#[repr(C)]
+pub struct Dst4 { a: u64, q: &'static u64 }
 
 #[no_mangle]
 pub fn hint_map_caps(b: Box<Pair>) -> Box<u64> { Box::map(b, |e| e.x) }
@@ -62,6 +72,10 @@ pub fn hint_thin_plain(t: ThinBox<Plain>) { drop(t) }
 #[no_mangle]
 pub fn hint_inplace_caps(v: Vec<Src2>) -> Vec<Dst2> {
     v.into_iter().map(|e| Dst2([e.a, e.b, e.c, 0])).collect()
+}
+#[no_mangle]
+pub fn hint_inplace_rewrite(v: Vec<Src4>) -> Vec<Dst4> {
+    v.into_iter().map(|e| Dst4 { a: e.a + e.b + e.c + e.d, q: e.p }).collect()
 }
 #[no_mangle]
 pub fn hint_inplace_plain(v: Vec<PSrc>) -> Vec<PDst> {
@@ -113,15 +127,44 @@ pub fn hint_inplace_plain(v: Vec<PSrc>) -> Vec<PDst> {
 // CHECK-LABEL: define{{.*}}18from_iter_in_place{{.*}}4PSrc
 // CHECK-NOT: "mem.wipe_cap_words"
 
-// from_iter_in_place::<_, Dst2> (Src2 holds a cap): dropped tail before shrink.
+// from_iter_in_place::<_, Dst2> (Src2 holds a cap, Dst2 none): the bytes past
+// the live elements, `[len * 32, old)`, before the shrink (`live` spec). No rewrite
+// wipe (Dst2 holds no caps; its arm is unreachable and carries no fact).
 // CHECK-LABEL: define{{.*}}18from_iter_in_place{{.*}}4Src2
-// o0: [[REM:%.*]] = urem i64 [[OLD:%.*]], 32
-// o0-NEXT: [[NEW:%.*]] = sub i64 [[OLD]], [[REM]]
-// o0-NEXT: [[AT:%.*]] = getelementptr inbounds i8, ptr addrspace(200) %{{.*}}, i64 [[NEW]]
-// o0-NEXT: "mem.wipe_cap_words"(ptr addrspace(200) [[AT]], i64 [[REM]])
-// o0-NEXT: ; call <alloc::alloc::Global>::shrink_impl_runtime
-// mir: "mem.wipe_cap_words"(ptr addrspace(200) %{{.*}}, i64 %{{.*}})
-// mir-NEXT: ; call <alloc::alloc::Global>::shrink_impl_runtime
+// o0: [[LIVE:%.*]] = mul i64 %len, 32
+// o0-NEXT: [[AT:%.*]] = getelementptr inbounds i8, ptr addrspace(200) %{{.*}}, i64 [[LIVE]]
+// o0-NEXT: [[N:%.*]] = sub i64 %src_size, [[LIVE]]
+// o0-NEXT: "mem.wipe_cap_words"(ptr addrspace(200) [[AT]], i64 [[N]])
+// o0-NOT: "mem.wipe_cap_words"
+// o0: ; call <alloc::alloc::Global>::shrink_impl_runtime
+// mir: [[LIVE:%.*]] = shl i64 %len, 5
+// mir-NEXT: [[AT:%.*]] = getelementptr inbounds i8, ptr addrspace(200) %self8, i64 [[LIVE]]
+// mir-NEXT: [[N:%.*]] = sub i64 %src_size, [[LIVE]]
+// mir-NEXT: "mem.wipe_cap_words"(ptr addrspace(200) [[AT]], i64 [[N]])
+// mir-NOT: "mem.wipe_cap_words"
+// mir: ; call <alloc::alloc::Global>::shrink_impl_runtime
+// rwoff: "mem.wipe_cap_words"
 // off-NOT: "mem.wipe_cap_words"
 // offall-NOT: "mem.wipe_cap_words"
 // CHECK: shrink_impl_runtime
+
+// from_iter_in_place::<_, Dst4> (Dst4 holds a cap): the dead bytes as above, then
+// the shrink rewrite: allocate, copy the kept bytes (`dst_size`), wipe the whole old
+// block (`src_size`), free. `-Zcheri-spec-relocate-rewrite=no` keeps the copy but
+// drops the wipe.
+// CHECK-LABEL: define{{.*}}18from_iter_in_place{{.*}}4Src4
+// o0: "mem.wipe_cap_words"(ptr addrspace(200) %{{.*}}, i64 %{{.*}})
+// o0: ; call <alloc::alloc::Global>::alloc_impl_runtime
+// o0: call {{.*}}@llvm.memcpy.p200.p200.i64(ptr addrspace(200) align 1 %{{.*}}, ptr addrspace(200) align 1 %self8, i64 %dst_size, i1 false)
+// o0-NEXT: "mem.wipe_cap_words"(ptr addrspace(200) %self8, i64 %src_size)
+// mir: "mem.wipe_cap_words"(ptr addrspace(200) %{{.*}}, i64 %{{.*}})
+// mir: ; call <alloc::alloc::Global>::alloc_impl_runtime
+// mir: call {{.*}}@llvm.memcpy.p200.p200.i64(ptr addrspace(200) nonnull align 1 %{{.*}}, ptr addrspace(200) nonnull align 1 %self8, i64 %dst_size, i1 false)
+// mir-NEXT: "mem.wipe_cap_words"(ptr addrspace(200) %self8, i64 %src_size)
+// mir: ; call __rustc::__rust_dealloc
+// rwoff: call {{.*}}@llvm.memcpy.p200.p200.i64(ptr addrspace(200) align 1 %{{.*}}, ptr addrspace(200) align 1 %self8, i64 %dst_size, i1 false)
+// rwoff-NOT: "mem.wipe_cap_words"
+// rwoff: ; call __rustc::__rust_dealloc
+// off-NOT: "mem.wipe_cap_words"
+// offall-NOT: "mem.wipe_cap_words"
+// CHECK: ret void

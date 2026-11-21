@@ -497,6 +497,77 @@ pub enum NonDivergingIntrinsic<'tcx> {
     /// MIR visitors rename it with the body; `Local::MAX` means the link was lost (e.g. the
     /// local was removed), and the start is then dropped by codegen.
     LoanStart(u64, Local),
+    /// [LLM-generated] CHERI M7.2e: a lowered `#[rustc_cheri_spec]` statement spec. See
+    /// [`CheriSpecStmt`]. Built only on CHERI targets with the spec lowering on.
+    CheriSpec(Box<CheriSpecStmt<'tcx>>),
+}
+
+impl<'tcx> CheriSpecStmt<'tcx> {
+    /// Every operand read by the statement, in order.
+    pub fn operands(&self) -> Vec<&Operand<'tcx>> {
+        let mut v = Vec::new();
+        let (ops, exprs): (Vec<&Operand<'tcx>>, [&CheriSpecExpr<'tcx>; 2]) = match self {
+            CheriSpecStmt::WipeDead { block, live, size, .. } => (vec![block], [live, size]),
+            CheriSpecStmt::Relocated { from, to, keep, size, .. } => (vec![from, to], [keep, size]),
+        };
+        v.extend(ops);
+        for e in exprs {
+            for it in &e.0 {
+                if let CheriSpecItem::Operand(op) = it {
+                    v.push(op);
+                }
+            }
+        }
+        v
+    }
+}
+
+/// [LLM-generated] CHERI M7.2e: one item of a [`CheriSpecExpr`] (reverse Polish order).
+#[derive(Clone, TyEncodable, TyDecodable, Debug, PartialEq, StableHash)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub enum CheriSpecItem<'tcx> {
+    /// A `usize` operand.
+    Operand(Operand<'tcx>),
+    Const(u64),
+    /// `size_of::<T>()`, evaluated after monomorphization.
+    SizeOf(Ty<'tcx>),
+    Add,
+    Sub,
+    Mul,
+}
+
+/// [LLM-generated] CHERI M7.2e: a byte count from a spec, in reverse Polish order.
+#[derive(Clone, TyEncodable, TyDecodable, Debug, PartialEq, StableHash)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub struct CheriSpecExpr<'tcx>(pub Vec<CheriSpecItem<'tcx>>);
+
+/// [LLM-generated] CHERI M7.2e: statement-level effects of a `live` spec on a `relocates`
+/// call.
+#[derive(Clone, TyEncodable, TyDecodable, Debug, PartialEq, StableHash)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub enum CheriSpecStmt<'tcx> {
+    /// Before the relocating call: the bytes `[block + live, block + size)` held only dead
+    /// values of `held`. Codegen wipes their capability words if `held` may hold
+    /// capabilities. No effect on execution otherwise.
+    WipeDead {
+        block: Operand<'tcx>,
+        live: CheriSpecExpr<'tcx>,
+        size: CheriSpecExpr<'tcx>,
+        held: Ty<'tcx>,
+    },
+    /// The substituted relocation (allocate + copy + wipe + free): `to` (a fresh block,
+    /// `NonNull<[u8]>`) receives the first `keep` bytes of `from` (`NonNull<u8>`), then the
+    /// capability words of all `size` bytes of `from` are wiped. `from` is freed next.
+    /// The wipe is emitted only if `ty` (the type of the kept values; the rewrite is taken
+    /// only when it may hold capabilities) may hold capabilities, so the unreachable arm of
+    /// a cap-free monomorph carries no fact.
+    Relocated {
+        from: Operand<'tcx>,
+        to: Operand<'tcx>,
+        keep: CheriSpecExpr<'tcx>,
+        size: CheriSpecExpr<'tcx>,
+        ty: Ty<'tcx>,
+    },
 }
 
 /// Describes whether this operand use performs a retag.

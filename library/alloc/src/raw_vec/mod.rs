@@ -201,7 +201,7 @@ const impl<T, A: [const] Allocator + [const] Destruct> RawVec<T, A> {
     /// caller to ensure `len == self.capacity()`.
     #[cfg(not(no_global_oom_handling))]
     #[inline(never)]
-    pub(crate) fn grow_one(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] pub(crate) fn grow_one(&mut self) {
         if typic_wipe_t::<T>() {
             // typic T: explicit alloc+copy+wipe-old+dealloc-old (never
             // wipe before an in-place grow; we do not call alloc.grow).
@@ -217,7 +217,7 @@ const impl<T, A: [const] Allocator + [const] Destruct> RawVec<T, A> {
 
     // typic grow helpers live in this const impl so `grow_one` can call them.
     #[cfg(not(no_global_oom_handling))]
-    unsafe fn grow_amortized_wipe(
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] unsafe fn grow_amortized_wipe(
         &mut self,
         len: usize,
         additional: usize,
@@ -234,7 +234,7 @@ const impl<T, A: [const] Allocator + [const] Destruct> RawVec<T, A> {
         Ok(())
     }
 
-    unsafe fn grow_exact_wipe(
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] unsafe fn grow_exact_wipe(
         &mut self,
         len: usize,
         additional: usize,
@@ -252,7 +252,7 @@ const impl<T, A: [const] Allocator + [const] Destruct> RawVec<T, A> {
     // plant mem.wipe_cap_words on the old-block dealloc. The allocate+copy
     // body is the type-erased RawVecInner helper (one copy per allocator,
     // not per T) to cut the w2 monomorph .text bloat.
-    unsafe fn finish_grow_wipe(&self, cap: usize) -> Result<NonNull<[u8]>, TryReserveError> {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] unsafe fn finish_grow_wipe(&self, cap: usize) -> Result<NonNull<[u8]>, TryReserveError> {
         let elem_layout = T::LAYOUT;
         let new_layout = layout_array(cap, elem_layout)?;
         if let Some((ptr, old_layout)) = unsafe { self.inner.current_memory(elem_layout) } {
@@ -423,7 +423,7 @@ impl<T, A: Allocator> RawVec<T, A> {
     /// Aborts on OOM.
     #[cfg(not(no_global_oom_handling))]
     #[inline]
-    pub(crate) fn reserve(&mut self, len: usize, additional: usize) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] pub(crate) fn reserve(&mut self, len: usize, additional: usize) {
         if typic_wipe_t::<T>() {
             if let Err(err) = unsafe { self.try_reserve_wipe(len, additional) } {
                 handle_error(err);
@@ -435,7 +435,7 @@ impl<T, A: Allocator> RawVec<T, A> {
     }
 
     /// The same as `reserve`, but returns on errors instead of panicking or aborting.
-    pub(crate) fn try_reserve(
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] pub(crate) fn try_reserve(
         &mut self,
         len: usize,
         additional: usize,
@@ -466,7 +466,7 @@ impl<T, A: Allocator> RawVec<T, A> {
     ///
     /// Aborts on OOM.
     #[cfg(not(no_global_oom_handling))]
-    pub(crate) fn reserve_exact(&mut self, len: usize, additional: usize) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] pub(crate) fn reserve_exact(&mut self, len: usize, additional: usize) {
         if typic_wipe_t::<T>() {
             if let Err(err) = unsafe { self.try_reserve_exact_wipe(len, additional) } {
                 handle_error(err);
@@ -478,7 +478,7 @@ impl<T, A: Allocator> RawVec<T, A> {
     }
 
     /// The same as `reserve_exact`, but returns on errors instead of panicking or aborting.
-    pub(crate) fn try_reserve_exact(
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] pub(crate) fn try_reserve_exact(
         &mut self,
         len: usize,
         additional: usize,
@@ -573,7 +573,7 @@ impl<T, A: Allocator> RawVec<T, A> {
     /// on a non-zero shrink, explicit alloc+copy+wipe-old+dealloc-old so a
     /// relocated (or size-class-returned) old buffer cannot go back tagged.
     /// Does not wipe a still-live in-place buffer (we do not call alloc.shrink).
-    unsafe fn shrink_wipe(&mut self, cap: usize) -> Result<(), TryReserveError> {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] unsafe fn shrink_wipe(&mut self, cap: usize) -> Result<(), TryReserveError> {
         assert!(
             cap <= self.capacity(),
             "Tried to shrink to a larger capacity"
@@ -608,7 +608,7 @@ impl<T, A: Allocator> RawVec<T, A> {
 #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
 const unsafe impl<#[may_dangle] T, A: [const] Allocator + [const] Destruct> Drop for RawVec<T, A> {
     /// Frees the memory owned by the `RawVec` *without* trying to drop its contents.
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.inner.ptr, size = self.inner.cap * size_of::<T>())"] fn drop(&mut self) {
         // SAFETY: We are in a Drop impl, self.inner will not be used again.
         unsafe { self.inner.deallocate(T::LAYOUT) }
     }
@@ -1103,7 +1103,7 @@ const impl<A: [const] Allocator> RawVecInner<A> {
     /// after this function returns.
     /// Ideally this function would take `self` by move, but it cannot because it exists to be
     /// called from a `Drop` impl.
-    unsafe fn deallocate(&mut self, elem_layout: Layout) {
+    #[rustc_cheri_spec = "frees(block = self.ptr, size = self.cap * elem_layout.size)"] unsafe fn deallocate(&mut self, elem_layout: Layout) {
         // SAFETY: Caller ensures `elem_layout` is correct for `self`.
         if let Some((ptr, layout)) = unsafe { self.current_memory(elem_layout) } {
             // SAFETY: `current_memory` gives us a pointer with provenance for our allocation

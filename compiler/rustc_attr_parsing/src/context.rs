@@ -192,6 +192,7 @@ attribute_parsers!(
         Combine<LinkParser>,
         Combine<ReprParser>,
         Combine<RustcAllowConstFnUnstableParser>,
+        Combine<RustcCheriSpecParser>,
         Combine<RustcCleanParser>,
         Combine<RustcDumpLayoutParser>,
         Combine<RustcMemContractParser>,

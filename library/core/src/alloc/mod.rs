@@ -271,7 +271,7 @@ pub const unsafe trait Allocator {
     /// [*currently allocated*]: #currently-allocated-memory
     /// [*fit*]: #memory-fitting
     #[stable(feature = "allocator_api", since = "CURRENT_RUSTC_VERSION")]
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
+    #[rustc_cheri_spec = "frees(block = ptr, size = layout.size)"] unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
 
     /// Attempts to extend the memory block.
     ///
@@ -313,7 +313,7 @@ pub const unsafe trait Allocator {
     ///
     /// [`handle_alloc_error`]: ../../alloc/alloc/fn.handle_alloc_error.html
     #[stable(feature = "allocator_api", since = "CURRENT_RUSTC_VERSION")]
-    unsafe fn grow(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = old_layout.size)"] unsafe fn grow(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
@@ -374,7 +374,7 @@ pub const unsafe trait Allocator {
     ///
     /// [`handle_alloc_error`]: ../../alloc/alloc/fn.handle_alloc_error.html
     #[stable(feature = "allocator_api", since = "CURRENT_RUSTC_VERSION")]
-    unsafe fn grow_zeroed(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = old_layout.size)"] unsafe fn grow_zeroed(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
@@ -441,7 +441,7 @@ pub const unsafe trait Allocator {
     ///
     /// [`handle_alloc_error`]: ../../alloc/alloc/fn.handle_alloc_error.html
     #[stable(feature = "allocator_api", since = "CURRENT_RUSTC_VERSION")]
-    unsafe fn shrink(
+    #[rustc_cheri_spec = "relocates(block = ptr, size = old_layout.size, keep = new_layout.size, alloc = allocate(self, new_layout), free = deallocate(self, ptr, old_layout))"] unsafe fn shrink(
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,

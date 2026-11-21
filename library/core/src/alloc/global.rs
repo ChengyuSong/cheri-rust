@@ -235,7 +235,7 @@ pub unsafe trait GlobalAlloc {
     ///
     /// Otherwise the behavior is undefined.
     #[stable(feature = "global_alloc", since = "1.28.0")]
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout);
+    #[rustc_cheri_spec = "frees(block = ptr, size = layout.size)"] unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout);
 
     /// Behaves like `alloc`, but also ensures that the contents
     /// are set to zero before being returned.
@@ -328,7 +328,7 @@ pub unsafe trait GlobalAlloc {
     ///
     /// [`handle_alloc_error`]: ../../alloc/alloc/fn.handle_alloc_error.html
     #[stable(feature = "global_alloc", since = "1.28.0")]
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+    #[rustc_cheri_spec = "relocates(block = ptr, size = layout.size, keep = new_size)"] unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let alignment = layout.alignment();
         // SAFETY: the caller must ensure that the `new_size` does not overflow
         // when rounded up to the next multiple of `alignment`.

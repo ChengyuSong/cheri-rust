@@ -537,6 +537,9 @@ impl<'tcx> Stable<'tcx> for mir::NonDivergingIntrinsic<'tcx> {
             NonDivergingIntrinsic::LoanStart(id, _) => {
                 crate::mir::NonDivergingIntrinsic::LoanStart(*id)
             }
+            NonDivergingIntrinsic::CheriSpec(spec) => crate::mir::NonDivergingIntrinsic::CheriSpec(
+                spec.operands().into_iter().map(|op| op.stable(tables, cx)).collect(),
+            ),
         }
     }
 }

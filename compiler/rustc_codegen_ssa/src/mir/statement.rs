@@ -96,6 +96,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::StatementKind::Intrinsic(NonDivergingIntrinsic::LoanStart(id, link)) => {
                 self.mem_loan_start(id, statement.source_info.scope, link);
             }
+            mir::StatementKind::Intrinsic(NonDivergingIntrinsic::CheriSpec(ref spec)) => {
+                self.mem_cheri_spec_stmt(bx, spec);
+            }
             mir::StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(ref op)) => {
                 let op_val = self.codegen_operand(bx, op);
                 bx.assume(op_val.immediate());

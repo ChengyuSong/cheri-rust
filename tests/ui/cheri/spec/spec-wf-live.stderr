@@ -1,0 +1,32 @@
+error: invalid `rustc_cheri_spec`: no local variable named `nope`
+  --> $DIR/spec-wf-live.rs:20:26
+   |
+LL |     #[rustc_cheri_spec = "live(block = nope, bytes = 0, held = *ptr)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `live`: `plain` has no `relocates` spec
+  --> $DIR/spec-wf-live.rs:26:26
+   |
+LL |     #[rustc_cheri_spec = "live(block = ptr, bytes = 0, held = *ptr)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `live` must be on a `let` whose initializer is a call
+  --> $DIR/spec-wf-live.rs:32:26
+   |
+LL |     #[rustc_cheri_spec = "live(block = ptr, bytes = 0, held = *ptr)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `ptr` has type `*mut u8`, not an integer
+  --> $DIR/spec-wf-live.rs:38:26
+   |
+LL |     #[rustc_cheri_spec = "live(block = ptr, bytes = ptr, held = *ptr)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `block`: `usize` is not a pointer
+  --> $DIR/spec-wf-live.rs:44:26
+   |
+LL |     #[rustc_cheri_spec = "live(block = n, bytes = 0, held = *ptr)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 5 previous errors
+

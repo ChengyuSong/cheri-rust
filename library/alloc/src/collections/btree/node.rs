@@ -31,13 +31,13 @@
 //   since leaf edges are empty and need no data representation. In an internal node,
 //   an edge both identifies a position and contains a pointer to a child node.
 
-// [LLM-generated] M7.2c CHERI: marks this module for the compiler. Every
-// `Allocator::deallocate` written in this module frees a BTree node, so a
-// CHERI build may wipe the node's capability fields right before it
-// (`-Zcheri-wipe-btree-nodes`). rustc finds such a call through the MIR
-// inline scopes, so it is still recognized after MIR inlining. No effect on
-// code generation otherwise.
-#![rustc_diagnostic_item = "cheri_btree_node"]
+// [LLM-generated] M7.2c/M7.2e CHERI: the node frees in this module carry
+// `#[rustc_cheri_spec = "dealloc_of(..., fields)"]`: a CHERI build may wipe
+// the freed node's capability fields (the parent link and, for an internal
+// node, the edge array) right before `Allocator::deallocate`
+// (`-Zcheri-wipe-btree-nodes`). rustc finds the free through the MIR inline
+// scopes, so it is still recognized after MIR inlining. No effect on code
+// generation otherwise.
 
 use core::marker::PhantomData;
 use core::mem::{self, MaybeUninit};
@@ -417,7 +417,7 @@ impl<K, V> NodeRef<marker::Dying, K, V, marker::LeafOrInternal> {
     /// Similar to `ascend`, gets a reference to a node's parent node, but also
     /// deallocates the current node in the process. This is unsafe because the
     /// current node will still be accessible despite being deallocated.
-    pub(super) unsafe fn deallocate_and_ascend<A: AllocatorClone>(
+    #[rustc_cheri_spec = "dealloc_of(ty = *self.node, or = *self.node.parent, fields)"] pub(super) unsafe fn deallocate_and_ascend<A: AllocatorClone>(
         self,
         alloc: A,
     ) -> Option<Handle<NodeRef<marker::Dying, K, V, marker::Internal>, marker::Edge>> {
@@ -639,7 +639,7 @@ impl<K, V> NodeRef<marker::Owned, K, V, marker::LeafOrInternal> {
     /// rooted at the first child of `self`.
     ///
     /// Panics if there is no internal level, i.e., if the root node is a leaf.
-    pub(super) fn pop_internal_level<A: AllocatorClone>(&mut self, alloc: A) {
+    #[rustc_cheri_spec = "dealloc_of(ty = *self.node, or = *self.node.parent, fields)"] pub(super) fn pop_internal_level<A: AllocatorClone>(&mut self, alloc: A) {
         assert!(self.height > 0);
 
         let top = self.node;
@@ -1454,7 +1454,7 @@ impl<'a, K, V> BalancingContext<'a, K, V> {
 
 impl<'a, K: 'a, V: 'a> BalancingContext<'a, K, V> {
     /// Performs a merge and lets a closure decide what to return.
-    fn do_merge<
+    #[rustc_cheri_spec = "dealloc_of(ty = *self.left_child.node, or = *self.left_child.node.parent, fields)"] fn do_merge<
         F: FnOnce(
             NodeRef<marker::Mut<'a>, K, V, marker::Internal>,
             NodeRef<marker::Mut<'a>, K, V, marker::LeafOrInternal>,

@@ -218,6 +218,8 @@ impl<'a, 'tcx> ConstAnalysis<'a, 'tcx> {
                 // This statement represents `*dst = *src`, `count` times.
             }
             NonDivergingIntrinsic::LoanEnd(..) | NonDivergingIntrinsic::LoanStart(..) => {}
+            // [LLM-generated] CHERI M7.2e: writes only through pointers.
+            NonDivergingIntrinsic::CheriSpec(..) => {}
         }
     }
 

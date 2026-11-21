@@ -64,6 +64,11 @@ impl<'a, 'tcx> Visitor<'tcx> for LoanInvalidationsGenerator<'a, 'tcx> {
                 self.consume_operand(location, count);
             }
             StatementKind::Intrinsic(NonDivergingIntrinsic::LoanEnd(..) | NonDivergingIntrinsic::LoanStart(..)) => {}
+            StatementKind::Intrinsic(NonDivergingIntrinsic::CheriSpec(spec)) => {
+                for op in spec.operands() {
+                    self.consume_operand(location, op);
+                }
+            }
             // Only relevant for mir typeck
             StatementKind::AscribeUserType(..)
             // Only relevant for liveness and unsafeck

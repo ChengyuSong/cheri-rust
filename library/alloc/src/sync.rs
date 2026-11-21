@@ -3653,7 +3653,7 @@ unsafe impl<#[may_dangle] T: ?Sized, A: Allocator> Drop for Weak<T, A> {
     ///
     /// assert!(other_weak_foo.upgrade().is_none());
     /// ```
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.ptr)"] fn drop(&mut self) {
         // If we find out that we were the last weak pointer, then its time to
         // deallocate the data entirely. See the discussion in Arc::drop() about
         // the memory orderings
@@ -4474,7 +4474,7 @@ impl<T: ?Sized, A: Allocator> UniqueArcUninit<T, A> {
 }
 
 impl<T: ?Sized, A: Allocator> Drop for UniqueArcUninit<T, A> {
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.ptr)"] fn drop(&mut self) {
         // SAFETY:
         // * new() produced a pointer safe to deallocate.
         // * We own the pointer unless into_arc() was called, which forgets us.
@@ -5148,7 +5148,7 @@ unsafe impl<T: ?Sized, A: Allocator> DerefPure for UniqueArc<T, A> {}
 
 #[unstable(feature = "unique_rc_arc", issue = "112566")]
 unsafe impl<#[may_dangle] T: ?Sized, A: Allocator> Drop for UniqueArc<T, A> {
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.ptr)"] fn drop(&mut self) {
         // See `Arc::drop_slow` which drops an `Arc` with a strong count of 0.
         // SAFETY: This pointer was allocated at creation time so we know it is valid.
         let _weak = Weak { ptr: self.ptr, alloc: &self.alloc };

@@ -649,6 +649,39 @@ impl CombineAttributeParser for RustcMemContractSiteParser {
     }
 }
 
+/// [LLM-generated] CHERI M7.2e: `#[rustc_cheri_spec = "..."]` memory specs on functions,
+/// trait methods, foreign functions and `let` statements. Kept as strings here; parsed and
+/// checked by `rustc_middle::ty::cheri_spec` (check_attr, MIR build and codegen).
+pub(crate) struct RustcCheriSpecParser;
+
+impl CombineAttributeParser for RustcCheriSpecParser {
+    const PATH: &[Symbol] = &[sym::rustc_cheri_spec];
+
+    type Item = (Symbol, Span);
+
+    const CONVERT: ConvertFn<Self::Item> = |items, _| AttributeKind::RustcCheriSpec(items);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[
+        Allow(Target::Fn),
+        Allow(Target::ForeignFn),
+        Allow(Target::Method(MethodKind::Inherent)),
+        Allow(Target::Method(MethodKind::TraitImpl)),
+        Allow(Target::Method(MethodKind::Trait { body: true })),
+        Allow(Target::Method(MethodKind::Trait { body: false })),
+        Allow(Target::Statement),
+    ]);
+    const TEMPLATE: AttributeTemplate = template!(NameValueStr: "dealloc_of(ty = T)");
+    const STABILITY: AttributeStability = unstable!(rustc_attrs);
+
+    fn extend(
+        cx: &mut AcceptContext<'_, '_>,
+        args: &ArgParser,
+    ) -> impl IntoIterator<Item = Self::Item> {
+        let nv = cx.expect_name_value(args, cx.attr_span, None)?;
+        let span = nv.value_span;
+        cx.expect_string_literal(nv).map(|s| (s, span))
+    }
+}
+
 pub(crate) struct RustcMirParser;
 
 impl CombineAttributeParser for RustcMirParser {

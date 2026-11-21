@@ -400,6 +400,8 @@ impl<'a, 'tcx> TOFinder<'a, 'tcx> {
             // copy_nonoverlapping takes pointers and mutated the pointed-to value.
             | StatementKind::Intrinsic(NonDivergingIntrinsic::CopyNonOverlapping(..))
             | StatementKind::Intrinsic(NonDivergingIntrinsic::LoanEnd(..) | NonDivergingIntrinsic::LoanStart(..))
+            // [LLM-generated] CHERI M7.2e: writes only through pointers.
+            | StatementKind::Intrinsic(NonDivergingIntrinsic::CheriSpec(..))
             | StatementKind::AscribeUserType(..)
             | StatementKind::Coverage(..)
             | StatementKind::FakeRead(..)

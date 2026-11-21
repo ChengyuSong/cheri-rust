@@ -350,6 +350,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             AttributeKind::RustcDeprecatedSafe2024 { .. } => (),
             AttributeKind::RustcDiagnosticItem(..) => (),
             AttributeKind::RustcMemContract(..) => (),
+            AttributeKind::RustcCheriSpec(items) => self.check_cheri_spec(hir_id, target, items),
             AttributeKind::RustcMemContractSite(..) => (),
             AttributeKind::RustcDoNotConstCheck => (),
             AttributeKind::RustcDocPrimitive(..) => (),
@@ -1576,6 +1577,38 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
         {
             self.dcx()
                 .emit_err(diagnostics::BothOptimizeNoneAndInline { optimize_span, inline_span });
+        }
+    }
+
+    /// [LLM-generated] CHERI M7.2e: well-formedness of `#[rustc_cheri_spec = "..."]`. Syntax
+    /// everywhere; names, fields and types on functions. Statement specs name locals and
+    /// are checked when the MIR is built.
+    fn check_cheri_spec(&self, hir_id: HirId, target: Target, items: &ThinVec<(Symbol, Span)>) {
+        use rustc_middle::ty::cheri_spec::{CheriSpec, check_fn_spec, parse_spec};
+        for (s, span) in items.iter() {
+            let spec = match parse_spec(s.as_str()) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    self.dcx().span_err(*span, format!("malformed `rustc_cheri_spec`: {e}"));
+                    continue;
+                }
+            };
+            if target == Target::Statement {
+                if !matches!(spec, CheriSpec::Live { .. }) {
+                    self.dcx().span_err(
+                        *span,
+                        format!(
+                            "`rustc_cheri_spec`: `{}` is a function spec; only `live` may be put on a statement",
+                            spec.form_name()
+                        ),
+                    );
+                }
+                continue;
+            }
+            let def_id = hir_id.expect_owner().to_def_id();
+            for e in check_fn_spec(self.tcx, def_id, &spec) {
+                self.dcx().span_err(*span, format!("invalid `rustc_cheri_spec`: {e}"));
+            }
         }
     }
 

@@ -488,6 +488,21 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 this.record_operands_moved(&args);
 
+                // [LLM-generated] CHERI M7.2e: a `live` spec on this call (dead-range
+                // wipe, relocation rewrite). No-op otherwise.
+                block = this
+                    .cheri_live_at_call(
+                        block,
+                        expr_id,
+                        &fun,
+                        &args,
+                        destination,
+                        source_info,
+                        fn_span,
+                        success,
+                    )
+                    .into_block();
+
                 debug!("expr_into_dest: fn_span={:?}", fn_span);
 
                 this.cfg.terminate(

@@ -3788,7 +3788,7 @@ unsafe impl<#[may_dangle] T: ?Sized, A: Allocator> Drop for Weak<T, A> {
     ///
     /// assert!(other_weak_foo.upgrade().is_none());
     /// ```
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.ptr)"] fn drop(&mut self) {
         let inner = if let Some(inner) = self.inner() { inner } else { return };
 
         inner.dec_weak();
@@ -4645,7 +4645,7 @@ impl<T: ?Sized, A: Allocator> DerefMut for UniqueRc<T, A> {
 
 #[unstable(feature = "unique_rc_arc", issue = "112566")]
 unsafe impl<#[may_dangle] T: ?Sized, A: Allocator> Drop for UniqueRc<T, A> {
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.ptr)"] fn drop(&mut self) {
         // ignore-tidy-undocumented-unsafe
         unsafe {
             // destroy the contained object
@@ -4728,7 +4728,7 @@ impl<T: ?Sized, A: Allocator> UniqueRcUninit<T, A> {
 }
 
 impl<T: ?Sized, A: Allocator> Drop for UniqueRcUninit<T, A> {
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "dealloc_of(ty = T, block = self.ptr)"] fn drop(&mut self) {
         // SAFETY:
         // * new() produced a pointer safe to deallocate.
         // * We own the pointer unless into_rc() was called, which forgets us.

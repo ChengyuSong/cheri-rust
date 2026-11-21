@@ -213,7 +213,7 @@ const fn needs_realloc<SRC, DEST>(src_cap: usize, dst_cap: usize) -> bool {
 
 /// This provides a shorthand for the source type since local type aliases aren't a thing.
 #[rustc_specialization_trait]
-#[rustc_diagnostic_item = "cheri_wipe_in_place_collect_trait"] trait InPlaceCollect: SourceIter<Source: AsVecIntoIter> + InPlaceIterable {
+trait InPlaceCollect: SourceIter<Source: AsVecIntoIter> + InPlaceIterable {
     type Src;
 }
 
@@ -246,7 +246,7 @@ where
     }
 }
 
-#[rustc_diagnostic_item = "cheri_wipe_in_place_collect"] fn from_iter_in_place<I, T>(mut iterator: I) -> Vec<T>
+fn from_iter_in_place<I, T>(mut iterator: I) -> Vec<T>
 where
     I: Iterator<Item = T> + InPlaceCollect,
     <I as SourceIter>::Source: AsVecIntoIter,
@@ -322,7 +322,7 @@ where
             let dst_size = size_of::<T>().unchecked_mul(dst_cap);
             let new_layout = Layout::from_size_align_unchecked(dst_size, dst_align);
 
-            let result = alloc.shrink(dst_buf.cast(), old_layout, new_layout);
+            #[rustc_cheri_spec = "live(block = dst_buf, bytes = len * size_of::<T>(), held = *src_buf, ty = T)"] let result = alloc.shrink(dst_buf.cast(), old_layout, new_layout);
             let Ok(reallocated) = result else { handle_alloc_error(new_layout) };
             dst_buf = reallocated.cast::<T>();
         }

@@ -486,6 +486,33 @@ macro_rules! make_mir_visitor {
                                 self.visit_operand(count, location);
                             }
                             NonDivergingIntrinsic::LoanEnd(_) => {}
+                            // [LLM-generated] CHERI M7.2e: spec operands are uses.
+                            NonDivergingIntrinsic::CheriSpec(spec) => {
+                                let spec: & $($mutability)? CheriSpecStmt<'tcx> = spec;
+                                match spec {
+                                    CheriSpecStmt::WipeDead { block, live, size, held: _ } => {
+                                        self.visit_operand(block, location);
+                                        for e in [live, size] {
+                                            for it in & $($mutability)? e.0 {
+                                                if let CheriSpecItem::Operand(op) = it {
+                                                    self.visit_operand(op, location);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    CheriSpecStmt::Relocated { from, to, keep, size, ty: _ } => {
+                                        self.visit_operand(from, location);
+                                        self.visit_operand(to, location);
+                                        for e in [keep, size] {
+                                            for it in & $($mutability)? e.0 {
+                                                if let CheriSpecItem::Operand(op) = it {
+                                                    self.visit_operand(op, location);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             // [LLM-generated] R9 (D65): rename the link with the body.
                             NonDivergingIntrinsic::LoanStart(_, l) => {
                                 if *l != Local::MAX {

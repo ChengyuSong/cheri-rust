@@ -2463,12 +2463,14 @@ options! {
         deallocate call's `Layout` argument (the fallback for Box / Rc of an unsized pointee, \
         e.g. `Box<[T]>`, `Box<dyn Trait>`), use the Layout's `size` field, found by its offset \
         (default: yes). `no` keeps the old reading of element 0 of the scalar pair, which is \
-        the alignment on CHERI RISC-V, and is byte-identical to the 2741027e merged state"),
+        the alignment on CHERI RISC-V, and is byte-identical to the 2741027e merged state. \
+        M7.2e: the `rustc_cheri_spec` frees specs name the size, so this switch has no \
+        effect any more (kept so old command lines still parse)"),
     cheri_wipe_btree_nodes: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2c BTree node wipe: also emit `mem.wipe_cap_words`(ptr, size) \
         immediately before each `Allocator::deallocate` of a BTree node written in the \
-        module marked `#![rustc_diagnostic_item = \"cheri_btree_node\"]` \
-        (`alloc::collections::btree::node`), found through the MIR inline scopes so \
+        BTree node code (M7.2e: the `dealloc_of(.., fields)` specs in \
+        `alloc::collections::btree::node`), found through the MIR inline scopes so \
         that MIR inlining does not hide it (leaf or internal; every node holds its parent-link \
         capability, internal nodes also hold the child edge array). If K and V hold no \
         capabilities only the parent link and (internal nodes) the edge array are \
@@ -2478,14 +2480,30 @@ options! {
         `-Zcheri-annotate`)"),
     cheri_wipe_alloc_hints: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2d wipe hints: emit `mem.wipe_cap_words` for three library \
-        frees that no container drop covers, found by `rustc_diagnostic_item` markers and \
-        the MIR inline scopes (no library code changes): the old block of `Box::map` / \
+        frees that no container drop covers, found by the library's `rustc_cheri_spec` \
+        attributes (M7.2e; was `rustc_diagnostic_item` markers) and the MIR inline scopes: the old block of `Box::map` / \
         `Box::try_map` (dealloc, or the `Box<MaybeUninit<U>>` dropped on the error path), \
         the `ThinBox` block (dealloc in the `WithHeader::drop` guard, or the guard drop), \
-        and the dead tail of an in-place `collect` before its shrink. Only when the old \
+        and the dead part of an in-place `collect` block before its shrink (and the \
+        M7.2e shrink rewrite and its wipe). Only when the old \
         element type may hold capabilities (default: yes; `no` emits nothing and is \
         byte-identical to the merged trees; also needs `-Zcheri-wipe-cap-words` and \
         `-Zcheri-annotate`)"),
+    cheri_spec: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2e: lower `#[rustc_cheri_spec]` library specs (`dealloc_of`, \
+        `frees`, `relocates`, `live`) to `mem.wipe_cap_words` facts. These replace the \
+        name-keyed container / BTree / hint hooks; each form is still gated by its old switch \
+        (`fields` by `-Zcheri-wipe-btree-nodes`, inline `dealloc_of` and `live` by \
+        `-Zcheri-wipe-alloc-hints`, all by `-Zcheri-wipe-cap-words`). Default: yes; `no` \
+        emits no spec facts (CHERI targets only, also requires `-Zcheri-annotate`)"),
+    cheri_spec_relocate_rewrite: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2e: at a `relocates` call carrying a `live` statement spec (the \
+        in-place `collect` shrink), build a branch that, when the element type may hold \
+        capabilities, replaces the call by allocate + copy + wipe of the whole old block + \
+        free, so no capability is left in a block moved by the allocator. Default: yes; \
+        `no` builds the MIR unchanged. The MIR is built in the crate that defines the \
+        call (with build-std: the user's flags); also needs `-Zcheri-spec`, \
+        `-Zcheri-wipe-alloc-hints`, `-Zcheri-wipe-cap-words` and `-Zcheri-annotate`"),
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),

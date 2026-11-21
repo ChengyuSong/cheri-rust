@@ -17,6 +17,7 @@ use crate::traits::*;
 
 mod analyze;
 mod block;
+mod cheri_spec;
 mod constant;
 mod coverageinfo;
 pub mod debuginfo;
