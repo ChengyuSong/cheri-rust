@@ -2463,6 +2463,13 @@ options! {
         crate metadata, and use the marks of upstream crates at direct calls (and in the \
         callee summaries that follow calls). Default: yes; `no` gives the M7.2g output \
         (same-crate marks only). Needs `-Zcheri-stores-into-marks`"),
+    cheri_stores_into_marks_lib: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2i: let functions of `core` and `alloc` give callee store marks \
+        too (their own metadata marks when this crate is `core` or `alloc`, and generic or \
+        inline `core`/`alloc` functions instantiated in this crate). The panic handler, \
+        `fmt` methods and `compiler_builtins` stay excluded. Default: yes; `no` gives the \
+        M7.2h output (user-crate marks only) and ignores `core`/`alloc` metadata marks. \
+        Needs `-Zcheri-stores-into-marks`"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],
