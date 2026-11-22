@@ -663,7 +663,43 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if let Some(a) = self.arg_of(l) {
             return if is_cap_scalar(self.tcx, self.local_ty(l)) { vec![(0, (a, None))] } else { Vec::new() };
         }
-        self.all_defs(l, |rv| Some(self.trace_val_rv(rv, depth)), |_, _| None).unwrap_or_default()
+        self.all_defs(
+            l,
+            |rv| Some(self.trace_val_rv(rv, depth)),
+            |func, args| Some(self.trace_val_call(func, args, depth)),
+        )
+        .unwrap_or_default()
+    }
+
+    /// [LLM-generated] M7.2k: the pointers inside a call's return value, from the
+    /// callee's own `trace_val` of its return place (e.g. `MaybeUninit::new`,
+    /// `ManuallyDrop::new` left as calls in an O0/O1 library build), mapped onto the
+    /// caller's arguments. Only pointers that are (parts of) callee arguments by
+    /// value are mapped; small bodies only, as for `summary`.
+    fn trace_val_call(&self, func: &Operand<'tcx>, args: &CallArgs<'tcx>, depth: u32) -> Vec<ValPtr> {
+        let Some(inst) = self.callee(func) else { return Vec::new() };
+        if !self.tcx.is_mir_available(inst.def_id()) {
+            return Vec::new();
+        }
+        let body = self.tcx.instance_mir(inst.def);
+        let nstmts: usize = body.basic_blocks.iter().map(|b| b.statements.len()).sum();
+        if body.basic_blocks.len() > MAX_CALLEE_BLOCKS || nstmts > MAX_CALLEE_STMTS {
+            return Vec::new();
+        }
+        let sub = Analysis::new(self.tcx, inst, body, self.call_depth + 1, self.cache);
+        let mut out = Vec::new();
+        for (o, (a, d)) in sub.trace_val(&Operand::Copy(mir::Place::return_place()), 0) {
+            let (None, Some(arg)) = (d, args.get(a)) else { continue };
+            for (o2, s) in self.trace_val(&arg.node, depth + 1) {
+                if let Some(t) = o.checked_add(o2)
+                    && out.len() < MAX_VAL_PTRS
+                    && !out.contains(&(t, s))
+                {
+                    out.push((t, s));
+                }
+            }
+        }
+        out
     }
 
     fn trace_val_rv(&self, rv: &Rvalue<'tcx>, depth: u32) -> Vec<ValPtr> {

@@ -3521,7 +3521,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         }
         let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
-        if !self.is_store_into_cap_ty(ty) {
+        // [LLM-generated] M7.2k: also a whole-value copy of a pointer-scalar wrapper
+        // (`Option<&T>`, `NonNull<T>`), e.g. `*q = move tmp` after an inlined
+        // `Option::replace`.
+        let wrapper = self.cx.tcx().sess.opts.unstable_opts.cheri_stores_into_marks_aggregate
+            && matches!(rvalue, Rvalue::Use(..) | Rvalue::Cast(mir::CastKind::Transmute, ..))
+            && self.is_scalar_cap_wrapper(bx, ty, 0);
+        if !wrapper && !self.is_store_into_cap_ty(ty) {
             return;
         }
         if !self.store_into_dest_ok(*place) {
@@ -3559,6 +3565,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             _ => false,
         };
         if !kind_ok {
+            // [LLM-generated] M7.2k: an enum variant or union whose whole value is one
+            // pointer scalar (`Some(&x)`, `MaybeUninit { value }`): fact the pointer
+            // field at the dest itself (offset 0), without projecting the layout.
+            if matches!(kind, mir::AggregateKind::Adt(..))
+                && self.cx.tcx().sess.opts.unstable_opts.cheri_stores_into_marks_aggregate
+            {
+                self.mem_store_into_scalar_aggregate(bx, place, fields);
+            }
             return;
         }
         if !self.store_into_dest_ok(*place) {
@@ -3596,6 +3610,96 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if !emitted {
             self.mem_stats.store_into_skipped += 1;
         }
+    }
+
+    /// [LLM-generated] M7.2k: a non-`Box` ADT whose layout is one pointer scalar and
+    /// whose only non-ZST field (in its one data-carrying variant) is a capability
+    /// (`is_store_into_cap_ty`) or again such a wrapper: `Option<&T>`, `NonNull<T>`,
+    /// `Option<NonNull<T>>`. Not `Option<fn()>`, not `Box` / `Option<Box<T>>`.
+    fn is_scalar_cap_wrapper(&self, bx: &Bx, ty: Ty<'tcx>, depth: u32) -> bool {
+        let ty = self.monomorphize(ty);
+        let ty::Adt(def, args) = *ty.kind() else { return false };
+        if depth > 4 || ty.is_box() {
+            return false;
+        }
+        let layout = bx.cx().layout_of(ty);
+        if !matches!(layout.backend_repr, rustc_abi::BackendRepr::Scalar(s)
+            if matches!(s.primitive(), rustc_abi::Primitive::Pointer(_)))
+        {
+            return false;
+        }
+        let tcx = bx.tcx();
+        let fty_of = |f: &ty::FieldDef| {
+            tcx.normalize_erasing_regions(
+                ty::TypingEnv::fully_monomorphized(),
+                ty::Unnormalized::new_wip(f.ty(tcx, args).skip_norm_wip()),
+            )
+        };
+        let mut data = def.all_fields().filter(|f| !bx.cx().layout_of(fty_of(f)).is_zst());
+        let (Some(f), None) = (data.next(), data.next()) else { return false };
+        let fty = fty_of(f);
+        if fty.is_fn_ptr() {
+            return false;
+        }
+        self.is_store_into_cap_ty(fty) || self.is_scalar_cap_wrapper(bx, fty, depth + 1)
+    }
+
+    /// [LLM-generated] M7.2k: `place = Variant(op)` / `Union { f: op }` where the
+    /// value's layout is a single pointer scalar and exactly one field is a
+    /// capability (a pointer, reference, `MaybeUninit` / `ManuallyDrop` of one; not
+    /// a fn pointer): that field is the whole scalar, at offset 0 of the dest.
+    fn mem_store_into_scalar_aggregate(
+        &mut self,
+        bx: &mut Bx,
+        place: &mir::Place<'tcx>,
+        fields: &rustc_index::IndexVec<rustc_abi::FieldIdx, mir::Operand<'tcx>>,
+    ) {
+        let ty = self.monomorphize(place.ty(&self.mir.local_decls, bx.tcx()).ty);
+        if ty.is_box() || ty.is_fn_ptr() {
+            return;
+        }
+        let layout = bx.cx().layout_of(ty);
+        if !matches!(layout.backend_repr, rustc_abi::BackendRepr::Scalar(s)
+            if matches!(s.primitive(), rustc_abi::Primitive::Pointer(_)))
+        {
+            return;
+        }
+        let tcx = bx.tcx();
+        let mut caps = fields.iter().filter(|op| {
+            let fty = self.monomorphize(op.ty(&self.mir.local_decls, tcx));
+            let fty = match *fty.kind() {
+                ty::Adt(def, args) if tcx.lang_items().manually_drop() == Some(def.did()) => {
+                    args.type_at(0)
+                }
+                _ => fty,
+            };
+            self.is_store_into_cap_ty(fty)
+        });
+        let (Some(op), None) = (caps.next(), caps.next()) else { return };
+        if !self.store_into_dest_ok(*place) {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        }
+        let Some(dest) = self.store_into_dest_ptr(bx, *place) else {
+            self.mem_stats.store_into_skipped += 1;
+            return;
+        };
+        let cap_op = self.codegen_operand(bx, op);
+        let cap = match self.store_into_operand_cap(cap_op) {
+            Some(v) if Self::store_into_value_is_cap(bx, v) => v,
+            _ => {
+                self.mem_stats.store_into_skipped += 1;
+                return;
+            }
+        };
+        let mut slot = self.store_into_place_slot(bx, *place);
+        if slot.is_none()
+            && place.projection.len() == 1
+            && matches!(place.projection[0], mir::ProjectionElem::Deref)
+        {
+            slot = self.store_into_local_slot(bx, place.local, &mut Default::default());
+        }
+        self.store_into_emit(bx, dest, cap, slot);
     }
 
     /// Local, field, or constant-index field of a non-`Box` local; or a store

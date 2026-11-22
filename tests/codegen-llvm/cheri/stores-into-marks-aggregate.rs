@@ -69,3 +69,40 @@ pub unsafe fn put_tuple<'a>(q: *mut (u64, Option<&'a u64>), p: Option<&'a u64>) 
 pub fn put_mu<'a>(q: &mut MaybeUninit<Option<&'a u64>>, p: &'a u64) {
     q.write(Some(p));
 }
+
+// The stored value is a call result (`mk_some` left as a call): the callee's
+// return value traces to its argument, so the mark maps through the call.
+#[inline(never)]
+fn mk_some<'a>(p: &'a u64) -> Option<&'a u64> {
+    Some(p)
+}
+
+// on-LABEL: define{{.*}}@put_call(
+// on-SAME: "mem.stores_into_dst"="0"
+// on-SAME: "mem.stores_into"="0:0"
+// off-LABEL: define{{.*}}@put_call(
+// off-NOT: mem.stores_into
+// off: ret
+#[no_mangle]
+#[inline(never)]
+pub unsafe fn put_call<'a>(q: *mut Option<&'a u64>, p: &'a u64) {
+    unsafe { *q = mk_some(p) }
+}
+
+// Body fact (B2a) for a whole-value store of a pointer-scalar wrapper into a
+// nameable in-memory local; none with the switch off.
+// on-LABEL: define{{.*}}@b2a_wrapper(
+// on: "mem.store_into_slot"(ptr addrspace(200) %a, i64 16,
+// on: ret
+// off-LABEL: define{{.*}}@b2a_wrapper(
+// off-NOT: mem.store_into
+// off: ret
+#[no_mangle]
+#[inline(never)]
+pub fn b2a_wrapper(p: &u64) -> usize {
+    let mut a: [Option<&u64>; 2] = [None; 2];
+    let t = core::hint::black_box(Some(p));
+    a[1] = t;
+    core::hint::black_box(&mut a);
+    a.len()
+}
