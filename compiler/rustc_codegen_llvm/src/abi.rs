@@ -1034,9 +1034,6 @@ fn cheri_llvm_arg_starts<'tcx>(fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Vec<Option<u32
     out
 }
 
-/// CHERI M3.2: the `#[rustc_mem_contract]` contracts of `instance` in the C
-/// mirror's canonical form (`"slice(0,1,8,8);ref(ret,1,1);ret_borrows(0)"`,
-/// LLVM parameter indices), or `None`.
 /// [LLM-generated] M7.2f: the `mem.spec_frees` function attribute. `relocates` for a
 /// `relocates` spec, `frees` for `frees` or `dealloc_of` (on the function, or inherited
 /// from the trait method), `drop` for drop glue that reaches a destructor with such a
@@ -1083,6 +1080,9 @@ fn cheri_spec_free_mark<'tcx>(
     }
 }
 
+/// CHERI M3.2: the `#[rustc_mem_contract]` contracts of `instance` in the C
+/// mirror's canonical form (`"slice(0,1,8,8);ref(ret,1,1);ret_borrows(0)"`,
+/// LLVM parameter indices), or `None`.
 fn cheri_contract_canon<'tcx>(
     cx: &CodegenCx<'_, 'tcx>,
     fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
