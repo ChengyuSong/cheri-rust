@@ -2497,6 +2497,12 @@ options! {
         (`fields` by `-Zcheri-wipe-btree-nodes`, inline `dealloc_of` and `live` by \
         `-Zcheri-wipe-alloc-hints`, all by `-Zcheri-wipe-cap-words`). Default: yes; `no` \
         emits no spec facts (CHERI targets only, also requires `-Zcheri-annotate`)"),
+    cheri_spec_call_marks: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2f: put the `mem.spec_frees` attribute on functions whose \
+        `#[rustc_cheri_spec]` frees or relocates a block (and on drop glue that reaches one), \
+        so the late CHERI pass can untag address-only register copies before calls to them. \
+        Default: yes; `no` emits no attribute (also needs `-Zcheri-spec` and \
+        `-Zcheri-annotate`)"),
     cheri_spec_relocate_rewrite: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2e: at a `relocates` call carrying a `live` statement spec (the \
         in-place `collect` shrink), build a branch that, when the element type may hold \

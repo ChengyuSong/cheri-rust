@@ -719,6 +719,19 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
             );
         }
 
+        // [LLM-generated] M7.2f: mark functions that free or relocate a heap block by
+        // their `#[rustc_cheri_spec]` (and drop glue that reaches one), so the late CHERI
+        // pass can untag address-only register copies before calls to them.
+        if let Some(instance) = instance
+            && let Some(kind) = cheri_spec_free_mark(cx, instance)
+        {
+            attributes::apply_to_llfn(
+                llfn,
+                llvm::AttributePlace::Function,
+                &[llvm::CreateAttrStringValue(cx.llcx, "mem.spec_frees", kind)],
+            );
+        }
+
         // If the declaration has an associated instance, compute extra attributes based on that.
         if let Some(instance) = instance {
             llfn_attrs_from_instance(
@@ -955,6 +968,52 @@ fn cheri_llvm_arg_starts<'tcx>(fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Vec<Option<u32
 /// CHERI M3.2: the `#[rustc_mem_contract]` contracts of `instance` in the C
 /// mirror's canonical form (`"slice(0,1,8,8);ref(ret,1,1);ret_borrows(0)"`,
 /// LLVM parameter indices), or `None`.
+/// [LLM-generated] M7.2f: the `mem.spec_frees` function attribute. `relocates` for a
+/// `relocates` spec, `frees` for `frees` or `dealloc_of` (on the function, or inherited
+/// from the trait method), `drop` for drop glue that reaches a destructor with such a
+/// spec through fields (a few levels deep). The attribute is a fact; the late CHERI
+/// pass decides what to do at calls to the function.
+fn cheri_spec_free_mark<'tcx>(
+    cx: &CodegenCx<'_, 'tcx>,
+    instance: ty::Instance<'tcx>,
+) -> Option<&'static str> {
+    use rustc_middle::ty::TyCtxt;
+    use rustc_middle::ty::cheri_spec::{CheriSpec, fn_specs};
+    let tcx = cx.tcx;
+    let o = &tcx.sess.opts.unstable_opts;
+    if !tcx.sess.target.is_like_cheri || !o.cheri_annotate || !o.cheri_spec || !o.cheri_spec_call_marks
+    {
+        return None;
+    }
+    fn own<'tcx>(tcx: TyCtxt<'tcx>, did: rustc_span::def_id::DefId) -> Option<&'static str> {
+        fn_specs(tcx, did).1.iter().find_map(|s| match s {
+            CheriSpec::Relocates { .. } => Some("relocates"),
+            CheriSpec::Frees { .. } | CheriSpec::DeallocOf { .. } => Some("frees"),
+            _ => None,
+        })
+    }
+    fn glue<'tcx>(tcx: TyCtxt<'tcx>, t: Ty<'tcx>, depth: u32) -> bool {
+        let ty::Adt(def, args) = *t.kind() else {
+            return false;
+        };
+        if let Some(dtor) = tcx.adt_destructor(def.did())
+            && own(tcx, dtor.did).is_some()
+        {
+            return true;
+        }
+        depth > 0
+            && !def.is_enum()
+            && def.all_fields().any(|f| glue(tcx, f.ty(tcx, args).skip_norm_wip(), depth - 1))
+    }
+    match instance.def {
+        ty::InstanceKind::Item(did) => own(tcx, did),
+        ty::InstanceKind::Shim(ty::ShimKind::DropGlue(_, Some(dty))) => {
+            glue(tcx, dty, 3).then_some("drop")
+        }
+        _ => None,
+    }
+}
+
 fn cheri_contract_canon<'tcx>(
     cx: &CodegenCx<'_, 'tcx>,
     fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
