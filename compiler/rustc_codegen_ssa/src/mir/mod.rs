@@ -18,6 +18,7 @@ use crate::traits::*;
 mod analyze;
 mod block;
 mod cheri_spec;
+pub mod cheri_store_marks;
 mod constant;
 mod coverageinfo;
 pub mod debuginfo;

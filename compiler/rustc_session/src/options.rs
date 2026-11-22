@@ -2450,6 +2450,14 @@ options! {
          `!mem.guard`, `llvm.mem.claim`, `mem.alloc_inbounds` facts, `\"mem.free\"`, \
          `!mem.last_use`, `\"mem.move\"`) for the late LLVM CHERI passes; rustc itself \
          makes no CHERI decision (default: yes; CHERI targets only)"),
+    cheri_stores_into_marks: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2g: put `mem.stores_into` / `mem.stores_into_dst` parameter \
+        marks on user-crate functions whose body stores a pointer parameter (or a pointer \
+        read through a shared-reference parameter) at a constant offset from another \
+        pointer parameter, and on functions with a written `stores(p, into = place)` spec, \
+        so the late CHERI pass can add a caller-side store_into fact at direct calls. \
+        Default: yes; `no` emits no mark (CHERI targets only, also requires \
+        `-Zcheri-annotate`)"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],
