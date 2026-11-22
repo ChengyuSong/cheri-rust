@@ -2458,6 +2458,11 @@ options! {
         so the late CHERI pass can add a caller-side store_into fact at direct calls. \
         Default: yes; `no` emits no mark (CHERI targets only, also requires \
         `-Zcheri-annotate`)"),
+    cheri_stores_into_marks_xcrate: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2h: keep the callee store marks of non-generic functions in \
+        crate metadata, and use the marks of upstream crates at direct calls (and in the \
+        callee summaries that follow calls). Default: yes; `no` gives the M7.2g output \
+        (same-crate marks only). Needs `-Zcheri-stores-into-marks`"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],

@@ -112,6 +112,7 @@ trivially_parameterized_over_tcx! {
     rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs,
     rustc_middle::middle::debugger_visualizer::DebuggerVisualizerFile,
     rustc_middle::middle::deduced_param_attrs::DeducedParamAttrs,
+    rustc_middle::ty::cheri_spec::CheriStoreMark,
     rustc_middle::middle::exported_symbols::SymbolExportInfo,
     rustc_middle::middle::lib_features::FeatureStability,
     rustc_middle::middle::resolve::AmbigModChild,

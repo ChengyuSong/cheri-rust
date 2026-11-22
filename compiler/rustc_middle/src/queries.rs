@@ -2760,6 +2760,14 @@ rustc_queries! {
         separate_provide_extern
     }
 
+    /// [LLM-generated] CHERI M7.2h: the callee store marks of a non-generic function
+    /// (`rustc_codegen_ssa::mir::cheri_store_marks`), kept in crate metadata so that
+    /// direct calls from downstream crates get the same caller-side facts.
+    query cheri_store_marks(def_id: DefId) -> &'tcx [ty::cheri_spec::CheriStoreMark] {
+        desc { "computing CHERI callee store marks of `{}`", tcx.def_path_str(def_id) }
+        separate_provide_extern
+    }
+
     query doc_link_resolutions(def_id: ModId) -> &'tcx DocLinkResMap {
         eval_always
         desc { "resolutions for documentation links for a module" }
