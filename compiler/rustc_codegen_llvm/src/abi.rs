@@ -732,6 +732,15 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
             );
         }
 
+        // [LLM-generated] M7.2g: callee store marks. Parameter `src` gets
+        // "mem.stores_into"="<key>:<off>" (or "<key>:<off>:*<d>" when the stored value is
+        // read at byte offset d through `src`); parameter `dst` gets
+        // "mem.stores_into_dst"="<key>". The key pairs the two, so a later change to the
+        // parameter list (dead argument removal) cannot point a mark at the wrong one.
+        if let Some(instance) = instance {
+            cheri_apply_store_marks(cx, self, llfn, instance);
+        }
+
         // If the declaration has an associated instance, compute extra attributes based on that.
         if let Some(instance) = instance {
             llfn_attrs_from_instance(
@@ -947,6 +956,66 @@ pub(crate) fn to_llvm_calling_convention(sess: &Session, abi: CanonAbi) -> llvm:
 /// CHERI M3.2 (local prototype, LLM-generated): the LLVM parameter index of each
 /// Rust argument's first part (`None` for ignored arguments). Mirrors the index
 /// bookkeeping of `apply_attrs_llfn`.
+/// [LLM-generated] M7.2g: apply the callee store marks of `instance` (see
+/// `rustc_codegen_ssa::mir::cheri_store_marks`) as LLVM parameter string attributes.
+/// Only parameters passed as one direct LLVM argument are marked.
+fn cheri_apply_store_marks<'ll, 'tcx>(
+    cx: &CodegenCx<'ll, 'tcx>,
+    fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+    llfn: &'ll Value,
+    instance: ty::Instance<'tcx>,
+) {
+    use rustc_codegen_ssa::mir::cheri_store_marks::store_marks;
+    let marks = store_marks(cx.tcx, instance);
+    if marks.is_empty() {
+        return;
+    }
+    let starts = cheri_llvm_arg_starts(fn_abi);
+    let direct = |i: usize| -> Option<u32> {
+        let a = fn_abi.args.get(i)?;
+        if !matches!(a.mode, PassMode::Direct(_)) {
+            return None;
+        }
+        starts.get(i).copied().flatten()
+    };
+    let mut src_vals: Vec<(u32, String)> = Vec::new();
+    let mut dst_vals: Vec<(u32, String)> = Vec::new();
+    fn push(v: &mut Vec<(u32, String)>, idx: u32, item: String) {
+        if let Some(e) = v.iter_mut().find(|e| e.0 == idx) {
+            if !e.1.split(';').any(|x| x == item) {
+                e.1.push(';');
+                e.1.push_str(&item);
+            }
+        } else {
+            v.push((idx, item));
+        }
+    }
+    for m in &marks {
+        let (Some(si), Some(di)) = (direct(m.src), direct(m.dst)) else { continue };
+        let key = m.dst;
+        let item = match m.src_deref {
+            None => format!("{key}:{}", m.off),
+            Some(d) => format!("{key}:{}:*{d}", m.off),
+        };
+        push(&mut src_vals, si, item);
+        push(&mut dst_vals, di, format!("{key}"));
+    }
+    for (idx, v) in &src_vals {
+        attributes::apply_to_llfn(
+            llfn,
+            llvm::AttributePlace::Argument(*idx),
+            &[llvm::CreateAttrStringValue(cx.llcx, "mem.stores_into", v)],
+        );
+    }
+    for (idx, v) in &dst_vals {
+        attributes::apply_to_llfn(
+            llfn,
+            llvm::AttributePlace::Argument(*idx),
+            &[llvm::CreateAttrStringValue(cx.llcx, "mem.stores_into_dst", v)],
+        );
+    }
+}
+
 fn cheri_llvm_arg_starts<'tcx>(fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Vec<Option<u32>> {
     let mut i: u32 = if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
     let mut out = Vec::with_capacity(fn_abi.args.len());
