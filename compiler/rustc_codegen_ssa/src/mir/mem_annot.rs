@@ -2623,6 +2623,121 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         self.mem_stats.store_into += 1;
     }
 
+    /// [LLM-generated] M7.2j: at a direct call to a callee with store marks
+    /// (`cheri_store_marks`: local inference, crate metadata or core/alloc lib
+    /// marks), emit the caller-side `mem.store_into_slot(dst, off, cap)` fact right
+    /// after the call, here at codegen time, so it is still there after LLVM inlines
+    /// the callee. The fact carries `!mem.stores_into.mark` (the late pass applies the
+    /// caller-mark skip rules: destination freed or consumed before the free) and
+    /// `!mem.stores_into.at_call` (the late pass does not lower the same mark again at
+    /// a call that survives). With `":*d"` marks the stored value is reloaded through
+    /// the shared-reference argument after the call. A destination in the caller's
+    /// own frame (`&mut local`) gets no fact: a fact operand would keep that local in
+    /// memory. Same emit filter as the B2a facts (`store_into_enabled`).
+    pub(crate) fn mem_store_marks_at_call(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        instance: Option<ty::Instance<'tcx>>,
+        llargs: &[Bx::Value],
+    ) {
+        let Some(inst) = instance else { return };
+        let tcx = self.cx.tcx();
+        if !tcx.sess.opts.unstable_opts.cheri_stores_into_marks_at_call
+            || !crate::mir::cheri_store_marks::enabled(tcx)
+            || !self.store_into_enabled()
+        {
+            return;
+        }
+        let marks = crate::mir::cheri_store_marks::store_marks(tcx, inst);
+        if marks.is_empty() {
+            return;
+        }
+        // The marks use the callee's MIR argument indices; skip calls where those are
+        // not the ABI argument indices (untupled "rust-call" arguments).
+        let extra = inst.def.requires_caller_location(tcx) as usize;
+        if self.mem_store_into_args.len() + extra != fn_abi.args.len() {
+            return;
+        }
+        // Rust argument index -> LLVM call argument index (Direct arguments only).
+        let mut starts: Vec<Option<usize>> = Vec::with_capacity(fn_abi.args.len());
+        let mut i = 0usize;
+        for arg in fn_abi.args.iter() {
+            let Some((width, _)) = Self::ffi_llvm_arg_span(&arg.mode) else { return };
+            starts.push(matches!(arg.mode, PassMode::Direct(_)).then_some(i));
+            i += width as usize;
+        }
+        for m in &marks {
+            let (Some(&Some(si)), Some(&Some(di))) = (starts.get(m.src), starts.get(m.dst)) else {
+                continue;
+            };
+            let (Some(&src), Some(&dst)) = (llargs.get(si), llargs.get(di)) else { continue };
+            if !Self::store_into_value_is_cap(bx, src) || !Self::store_into_value_is_cap(bx, dst) {
+                continue;
+            }
+            if let Some(op) = self.mem_store_into_args.get(m.dst).cloned()
+                && self.at_call_dst_in_frame(&op)
+            {
+                continue;
+            }
+            let cap = match m.src_deref {
+                None => src,
+                Some(d) => {
+                    let addr = if d == 0 {
+                        src
+                    } else {
+                        bx.inbounds_gep(bx.cx().type_i8(), src, &[bx.cx().const_usize(d)])
+                    };
+                    bx.load(bx.cx().val_ty(src), addr, Align::from_bytes(16).unwrap())
+                }
+            };
+            let off = bx.cx().const_u64(m.off);
+            bx.mem_fact_md(
+                "mem.store_into_slot",
+                &[dst, off, cap],
+                &["mem.stores_into.mark", "mem.stores_into.at_call"],
+            );
+        }
+    }
+
+    /// [LLM-generated] M7.2j: whether a call operand is the address of (a field of)
+    /// a local of this frame: `&mut l`, `&raw mut l.f`, through plain copies/casts.
+    fn at_call_dst_in_frame(&self, op: &mir::Operand<'tcx>) -> bool {
+        let (mir::Operand::Copy(p) | mir::Operand::Move(p)) = op else { return false };
+        let Some(mut l) = p.as_local() else { return false };
+        for _ in 0..8 {
+            let mut def = None;
+            let mut n = 0;
+            for bb in self.mir.basic_blocks.iter() {
+                for st in &bb.statements {
+                    if let StatementKind::Assign(a) = &st.kind
+                        && a.0.local == l
+                    {
+                        n += 1;
+                        if a.0.projection.is_empty() {
+                            def = Some(&a.1);
+                        }
+                    }
+                }
+            }
+            if n != 1 {
+                return false;
+            }
+            match def {
+                Some(Rvalue::Ref(_, _, q)) | Some(Rvalue::RawPtr(_, q)) => {
+                    return !q.projection.iter().any(|e| matches!(e, PlaceElem::Deref));
+                }
+                Some(Rvalue::Use(Operand::Copy(q) | Operand::Move(q), _))
+                | Some(Rvalue::Cast(_, Operand::Copy(q) | Operand::Move(q), _)) => {
+                    let Some(ql) = q.as_local() else { return false };
+                    l = ql;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn callee_def_path(&self, func: &mir::Operand<'tcx>) -> Option<String> {
         let ty = self.monomorphize(func.ty(self.mir, self.cx.tcx()));
         let ty::FnDef(def_id, _) = *ty.kind() else { return None };

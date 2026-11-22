@@ -2470,6 +2470,13 @@ options! {
         `fmt` methods and `compiler_builtins` stay excluded. Default: yes; `no` gives the \
         M7.2h output (user-crate marks only) and ignores `core`/`alloc` metadata marks. \
         Needs `-Zcheri-stores-into-marks`"),
+    cheri_stores_into_marks_at_call: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2j: at a direct call (in a user-crate function) to a callee \
+        with callee store marks, emit the caller-side `mem.store_into_slot` fact right \
+        after the call at codegen time (with `!mem.stores_into.mark` and \
+        `!mem.stores_into.at_call`), so it survives LLVM inlining. Destinations in the \
+        caller's own frame get no fact. Default: yes; `no` gives the M7.2i output. \
+        Needs `-Zcheri-stores-into-marks` and `-Zcheri-store-into`"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],

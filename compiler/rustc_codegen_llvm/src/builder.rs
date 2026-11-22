@@ -1132,6 +1132,31 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
+    fn mem_fact_md(&mut self, tag: &'static str, ops: &[&'ll Value], md: &[&'static str]) {
+        if mem_off("fact") {
+            return;
+        }
+        let (ty, f) = self.cx.get_intrinsic("llvm.mem.fact".into(), &[]);
+        let bundle = llvm::OperandBundleBox::new(tag, ops);
+        let bundles = [bundle.as_ref()];
+        let inst = unsafe {
+            llvm::LLVMBuildCallWithOperandBundles(
+                self.llbuilder,
+                ty,
+                f,
+                std::ptr::null(),
+                0,
+                bundles.as_ptr(),
+                bundles.len() as c_uint,
+                c"".as_ptr(),
+            )
+        };
+        for k in md {
+            let id = self.cx.get_md_kind_id(k);
+            self.cx.set_metadata_node(inst, id, &[]);
+        }
+    }
+
     fn set_next_call_mem_bundle(&mut self, tag: &'static str, ops: &[&'ll Value]) {
         if mem_off(tag) {
             return;

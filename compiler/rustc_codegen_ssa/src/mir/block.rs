@@ -311,6 +311,8 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 }
                 let invokeret = fx.mem_call_return_claim(bx, invokeret, fn_abi, instance);
                 fx.store_return(bx, ret_dest, &fn_abi.ret, invokeret);
+                // [LLM-generated] M7.2j: caller-side facts for callee store marks.
+                fx.mem_store_marks_at_call(bx, fn_abi, instance, llargs);
                 fx.mem_store_into_on_call(bx, instance, llargs, Some(invokeret));
 
                 // If the return value was retagged as it was stored,
@@ -348,6 +350,8 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 }
                 let llret = fx.mem_call_return_claim(bx, llret, fn_abi, instance);
                 fx.store_return(bx, ret_dest, &fn_abi.ret, llret);
+                // [LLM-generated] M7.2j: caller-side facts for callee store marks.
+                fx.mem_store_marks_at_call(bx, fn_abi, instance, llargs);
                 fx.mem_store_into_on_call(bx, instance, llargs, Some(llret));
                 self.funclet_br(fx, bx, target, mergeable_succ, &[])
             } else {

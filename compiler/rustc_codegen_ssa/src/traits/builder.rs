@@ -366,6 +366,11 @@ pub trait BuilderMethods<'a, 'tcx>:
 
     /// `call void @llvm.mem.fact() [ "<tag>"(ops) ]`.
     fn mem_fact(&mut self, _tag: &'static str, _ops: &[Self::Value]) {}
+    /// [LLM-generated] M7.2j: the same fact, with an empty metadata node of each
+    /// kind in `md` on the fact call (e.g. `!mem.stores_into.at_call`).
+    fn mem_fact_md(&mut self, tag: &'static str, ops: &[Self::Value], _md: &[&'static str]) {
+        self.mem_fact(tag, ops)
+    }
     /// [LLM-generated] M7.1d B3a: attach a string parameter attribute
     /// (`mem.ffi_borrow` / `mem.ffi_retain`) to argument `index` of the
     /// next `call` / `invoke`.
