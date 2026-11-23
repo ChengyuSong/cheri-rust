@@ -341,6 +341,8 @@ pub fn provide(providers: &mut Providers) {
     crate::base::provide(&mut providers.queries);
     crate::target_features::provide(&mut providers.queries);
     crate::codegen_attrs::provide(&mut providers.queries);
+    // [LLM-generated] CHERI M7.2h: callee store marks kept in crate metadata.
+    crate::mir::cheri_store_marks::provide(&mut providers.queries);
 }
 
 const RLINK_VERSION: u32 = 1;

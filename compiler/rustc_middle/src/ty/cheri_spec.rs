@@ -855,3 +855,19 @@ pub fn sibling_method(tcx: TyCtxt<'_>, def_id: DefId, name: Symbol) -> Option<De
     let tr = tcx.trait_of_assoc(def_id)?;
     tcx.associated_items(tr).filter_by_name_unhygienic(name).next().map(|i| i.def_id)
 }
+
+/// [LLM-generated] CHERI M7.2h: one callee store mark of a non-generic function, as
+/// kept in crate metadata (query `cheri_store_marks`). The body stores the pointer given
+/// by Rust argument `src` (0-based) into the 16-byte slot at byte offset `off` from
+/// argument `dst`; `src_deref` is `Some(d)` when the stored value is the pointer read
+/// at byte offset `d` through the shared reference `src`. Computed by
+/// `rustc_codegen_ssa::mir::cheri_store_marks` in the defining crate and only read by
+/// the CHERI codegen of downstream crates.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(rustc_macros::Decodable, rustc_macros::Encodable, rustc_macros::StableHash)]
+pub struct CheriStoreMark {
+    pub src: u32,
+    pub dst: u32,
+    pub off: u64,
+    pub src_deref: Option<u64>,
+}

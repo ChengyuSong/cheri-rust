@@ -26,6 +26,7 @@ use std::rc::Rc;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{self, BinOp, CastKind, Operand, ProjectionElem, Rvalue, StatementKind};
+use rustc_middle::ty::cheri_spec::CheriStoreMark;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_span::sym;
@@ -54,7 +55,9 @@ pub fn enabled(tcx: TyCtxt<'_>) -> bool {
 }
 
 /// The store marks of `instance`, sorted and deduplicated. Empty when the switch is
-/// off, the item is not a plain function of this crate, or its MIR is not available.
+/// off, the item is not a plain function of this crate, or its MIR is not available
+/// (M7.2h: except that a non-generic function of an upstream crate gets the marks
+/// recorded in that crate's metadata).
 pub fn store_marks<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Vec<StoreMark> {
     if !enabled(tcx) {
         return Vec::new();
@@ -66,10 +69,73 @@ pub fn store_marks<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Vec<Sto
         let cache = Cache::default();
         Analysis::new(tcx, instance, body, 0, &cache).run(&mut out);
     }
+    // [LLM-generated] M7.2h: a non-generic function of an upstream crate brings the
+    // marks its own crate computed (crate metadata).
+    if !def_id.is_local() {
+        out.extend(extern_marks(tcx, def_id));
+    }
     out.sort();
     out.dedup();
     out.truncate(MAX_MARKS);
     out
+}
+
+/// [LLM-generated] M7.2h: whether marks are kept in and read from crate metadata
+/// (`-Zcheri-stores-into-marks-xcrate`).
+pub fn xcrate_enabled(tcx: TyCtxt<'_>) -> bool {
+    enabled(tcx) && tcx.sess.opts.unstable_opts.cheri_stores_into_marks_xcrate
+}
+
+/// [LLM-generated] M7.2h: a function whose marks can travel in crate metadata: a
+/// plain non-generic function (its one instance is the item itself).
+fn xcrate_item(tcx: TyCtxt<'_>, def_id: rustc_span::def_id::DefId) -> bool {
+    matches!(tcx.def_kind(def_id), rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn)
+        && tcx.intrinsic(def_id).is_none()
+        && !tcx.is_foreign_item(def_id)
+        && !tcx.generics_of(def_id).requires_monomorphization(tcx)
+}
+
+/// [LLM-generated] M7.2h: the marks recorded in the metadata of the upstream crate
+/// that defines `def_id` (empty for local, generic or unmarked items).
+fn extern_marks(tcx: TyCtxt<'_>, def_id: rustc_span::def_id::DefId) -> Vec<StoreMark> {
+    if def_id.is_local() || !xcrate_enabled(tcx) || !xcrate_item(tcx, def_id) {
+        return Vec::new();
+    }
+    tcx.cheri_store_marks(def_id)
+        .iter()
+        .map(|m| StoreMark {
+            src: m.src as usize,
+            dst: m.dst as usize,
+            off: m.off,
+            src_deref: m.src_deref,
+        })
+        .collect()
+}
+
+/// [LLM-generated] M7.2h: local provider of the `cheri_store_marks` query, which the
+/// metadata encoder records: the marks of a non-generic function of this crate (the
+/// same list its declaration gets in this crate).
+fn cheri_store_marks_local<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: rustc_span::def_id::LocalDefId,
+) -> &'tcx [CheriStoreMark] {
+    let did = def_id.to_def_id();
+    if !xcrate_enabled(tcx) || !xcrate_item(tcx, did) {
+        return &[];
+    }
+    let marks = store_marks(tcx, Instance::mono(tcx, did));
+    tcx.arena.alloc_from_iter(marks.iter().filter_map(|m| {
+        Some(CheriStoreMark {
+            src: u32::try_from(m.src).ok()?,
+            dst: u32::try_from(m.dst).ok()?,
+            off: m.off,
+            src_deref: m.src_deref,
+        })
+    }))
+}
+
+pub(crate) fn provide(providers: &mut rustc_middle::query::Providers) {
+    providers.cheri_store_marks = cheri_store_marks_local;
 }
 
 /// The same filter as the body's own `store_into` facts: user-crate items only, not
@@ -312,7 +378,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let inst = Instance::try_resolve(self.tcx, ty::TypingEnv::fully_monomorphized(), did, args.no_bound_vars()?)
             .ok()??;
         let ty::InstanceKind::Item(cdid) = inst.def else { return None };
-        if self.tcx.is_foreign_item(cdid) || !self.tcx.is_mir_available(cdid) {
+        if self.tcx.is_foreign_item(cdid) {
+            return None;
+        }
+        // [LLM-generated] M7.2h: an upstream callee without MIR is summarized by the
+        // marks of its crate's metadata (see `summary`).
+        if !self.tcx.is_mir_available(cdid) && extern_marks(self.tcx, cdid).is_empty() {
             return None;
         }
         Some(inst)
@@ -325,6 +396,13 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
         // Mark the callee first, so a recursive call sees an empty summary.
         self.cache.borrow_mut().insert(inst, (Rc::new(Vec::new()), None));
+        // [LLM-generated] M7.2h: no MIR here (an upstream non-generic function): its
+        // metadata marks, and no return-pointer trace.
+        if !self.tcx.is_mir_available(inst.def_id()) {
+            let res = (Rc::new(extern_marks(self.tcx, inst.def_id())), None);
+            self.cache.borrow_mut().insert(inst, res.clone());
+            return res;
+        }
         let body = self.tcx.instance_mir(inst.def);
         let nstmts: usize = body.basic_blocks.iter().map(|b| b.statements.len()).sum();
         let res = if body.basic_blocks.len() > MAX_CALLEE_BLOCKS || nstmts > MAX_CALLEE_STMTS {

@@ -502,6 +502,8 @@ define_tables! {
     assoc_container: Table<DefIndex, LazyValue<ty::AssocContainer>>,
     macro_definition: Table<DefIndex, LazyValue<ast::DelimArgs>>,
     deduced_param_attrs: Table<DefIndex, LazyArray<DeducedParamAttrs>>,
+    // [LLM-generated] CHERI M7.2h: callee store marks of non-generic functions.
+    cheri_store_marks: Table<DefIndex, LazyArray<rustc_middle::ty::cheri_spec::CheriStoreMark>>,
     collect_return_position_impl_trait_in_trait_tys: Table<DefIndex, LazyValue<DefIdMap<ty::EarlyBinder<'static, Ty<'static>>>>>,
     doc_link_resolutions: Table<DefIndex, LazyValue<DocLinkResMap>>,
     doc_link_traits_in_scope: Table<DefIndex, LazyArray<DefId>>,

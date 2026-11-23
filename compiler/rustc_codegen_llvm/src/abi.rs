@@ -953,9 +953,6 @@ pub(crate) fn to_llvm_calling_convention(sess: &Session, abi: CanonAbi) -> llvm:
     }
 }
 
-/// CHERI M3.2 (local prototype, LLM-generated): the LLVM parameter index of each
-/// Rust argument's first part (`None` for ignored arguments). Mirrors the index
-/// bookkeeping of `apply_attrs_llfn`.
 /// [LLM-generated] M7.2g: apply the callee store marks of `instance` (see
 /// `rustc_codegen_ssa::mir::cheri_store_marks`) as LLVM parameter string attributes.
 /// Only parameters passed as one direct LLVM argument are marked.
@@ -1016,6 +1013,9 @@ fn cheri_apply_store_marks<'ll, 'tcx>(
     }
 }
 
+/// CHERI M3.2 (local prototype, LLM-generated): the LLVM parameter index of each
+/// Rust argument's first part (`None` for ignored arguments). Mirrors the index
+/// bookkeeping of `apply_attrs_llfn`.
 fn cheri_llvm_arg_starts<'tcx>(fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Vec<Option<u32>> {
     let mut i: u32 = if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
     let mut out = Vec::with_capacity(fn_abi.args.len());

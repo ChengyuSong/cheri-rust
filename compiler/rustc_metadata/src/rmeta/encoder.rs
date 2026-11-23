@@ -1940,6 +1940,27 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 }
             }
         }
+
+        // [LLM-generated] CHERI M7.2h: callee store marks of non-generic functions, so a
+        // direct call from a downstream crate gets the same caller-side `store_into`
+        // facts as a call inside this crate. Only non-empty lists are recorded.
+        let o = &tcx.sess.opts.unstable_opts;
+        if tcx.sess.opts.output_types.should_codegen()
+            && tcx.sess.target.is_like_cheri
+            && o.cheri_annotate
+            && o.cheri_stores_into_marks
+            && o.cheri_stores_into_marks_xcrate
+        {
+            for &local_def_id in tcx.mir_keys(()) {
+                if let DefKind::AssocFn | DefKind::Fn = tcx.def_kind(local_def_id) {
+                    let marks = self.tcx.cheri_store_marks(local_def_id.to_def_id());
+                    if !marks.is_empty() {
+                        record_array!(self.tables.cheri_store_marks[local_def_id.to_def_id()] <-
+                            marks);
+                    }
+                }
+            }
+        }
     }
 
     #[instrument(level = "debug", skip(self))]

@@ -305,6 +305,16 @@ provide! { tcx, def_id, other, cdata,
             })
             .unwrap_or_default()
     }
+    // [LLM-generated] CHERI M7.2h: callee store marks (empty when none were recorded).
+    cheri_store_marks => {
+        cdata
+            .root
+            .tables
+            .cheri_store_marks
+            .get(cdata, def_id.index)
+            .map(|lazy| &*tcx.arena.alloc_from_iter(lazy.decode((cdata, tcx))))
+            .unwrap_or_default()
+    }
     opaque_ty_origin => { table }
     assumed_wf_types_for_rpitit => { table }
     collect_return_position_impl_trait_in_trait_tys => {
