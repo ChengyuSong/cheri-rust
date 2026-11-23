@@ -101,6 +101,12 @@ pub fn lib_enabled(tcx: TyCtxt<'_>) -> bool {
     enabled(tcx) && tcx.sess.opts.unstable_opts.cheri_stores_into_marks_lib
 }
 
+/// [LLM-generated] M7.2k: whether stores of whole values holding pointers give marks
+/// (`-Zcheri-stores-into-marks-aggregate`).
+fn aggregate_enabled(tcx: TyCtxt<'_>) -> bool {
+    enabled(tcx) && tcx.sess.opts.unstable_opts.cheri_stores_into_marks_aggregate
+}
+
 /// [LLM-generated] M7.2i: `core` or `alloc` (the library crates whose marks
 /// `-Zcheri-stores-into-marks-lib` turns on).
 fn is_lib_crate(tcx: TyCtxt<'_>, krate: rustc_span::def_id::CrateNum) -> bool {
@@ -202,6 +208,29 @@ fn is_cap_ptr(ty: Ty<'_>) -> bool {
         _ => false,
     }
 }
+
+/// [LLM-generated] M7.2k: a value that is exactly one capability: a reference or raw
+/// pointer, or a type whose layout is a single pointer scalar (`Option<&T>`, `Box<T>`,
+/// `NonNull<T>`, `Option<Box<T>>`). Such a parameter is passed as one LLVM pointer.
+fn is_cap_scalar<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    if is_cap_ptr(ty) {
+        return true;
+    }
+    if ty.is_fn_ptr() {
+        return false;
+    }
+    let cx = rustc_middle::ty::layout::LayoutCx::new(tcx, ty::TypingEnv::fully_monomorphized());
+    let Ok(layout) = cx.layout_of(ty) else { return false };
+    matches!(layout.backend_repr, rustc_abi::BackendRepr::Scalar(s)
+        if matches!(s.primitive(), rustc_abi::Primitive::Pointer(_)))
+}
+
+/// One pointer inside a stored value: its byte offset in the value and the source
+/// (`trace_cap` form).
+type ValPtr = (u64, (usize, Option<u64>));
+
+/// At most this many traced pointer fields per stored value.
+const MAX_VAL_PTRS: usize = 8;
 
 /// Byte offset of the field path `elems` (Field projections only, structs and tuples)
 /// inside a value of type `ty`.
@@ -614,6 +643,132 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         Some((a, Some(off)))
     }
 
+    /// [LLM-generated] M7.2k: the pointers inside a stored value of any type, each
+    /// with its byte offset in the value: a pointer-sized scalar argument (offset 0),
+    /// a pointer read through a shared reference argument, copies and transmutes of
+    /// such values, and struct / tuple / enum-variant / union aggregates whose fields
+    /// are such values. Pointers that trace to no argument are left out (no mark for
+    /// them: fail-safe).
+    fn trace_val(&self, op: &Operand<'tcx>, depth: u32) -> Vec<ValPtr> {
+        if depth > MAX_DEPTH {
+            return Vec::new();
+        }
+        let place = match op {
+            Operand::Copy(p) | Operand::Move(p) => *p,
+            _ => return Vec::new(),
+        };
+        let Some(l) = place.as_local() else {
+            return self.trace_cap_read(place).map(|s| vec![(0, s)]).unwrap_or_default();
+        };
+        if let Some(a) = self.arg_of(l) {
+            return if is_cap_scalar(self.tcx, self.local_ty(l)) { vec![(0, (a, None))] } else { Vec::new() };
+        }
+        self.all_defs(
+            l,
+            |rv| Some(self.trace_val_rv(rv, depth)),
+            |func, args| Some(self.trace_val_call(func, args, depth)),
+        )
+        .unwrap_or_default()
+    }
+
+    /// [LLM-generated] M7.2k: the pointers inside a call's return value, from the
+    /// callee's own `trace_val` of its return place (e.g. `MaybeUninit::new`,
+    /// `ManuallyDrop::new` left as calls in an O0/O1 library build), mapped onto the
+    /// caller's arguments. Only pointers that are (parts of) callee arguments by
+    /// value are mapped; small bodies only, as for `summary`.
+    fn trace_val_call(&self, func: &Operand<'tcx>, args: &CallArgs<'tcx>, depth: u32) -> Vec<ValPtr> {
+        let Some(inst) = self.callee(func) else { return Vec::new() };
+        if !self.tcx.is_mir_available(inst.def_id()) {
+            return Vec::new();
+        }
+        let body = self.tcx.instance_mir(inst.def);
+        let nstmts: usize = body.basic_blocks.iter().map(|b| b.statements.len()).sum();
+        if body.basic_blocks.len() > MAX_CALLEE_BLOCKS || nstmts > MAX_CALLEE_STMTS {
+            return Vec::new();
+        }
+        let sub = Analysis::new(self.tcx, inst, body, self.call_depth + 1, self.cache);
+        let mut out = Vec::new();
+        for (o, (a, d)) in sub.trace_val(&Operand::Copy(mir::Place::return_place()), 0) {
+            let (None, Some(arg)) = (d, args.get(a)) else { continue };
+            for (o2, s) in self.trace_val(&arg.node, depth + 1) {
+                if let Some(t) = o.checked_add(o2)
+                    && out.len() < MAX_VAL_PTRS
+                    && !out.contains(&(t, s))
+                {
+                    out.push((t, s));
+                }
+            }
+        }
+        out
+    }
+
+    fn trace_val_rv(&self, rv: &Rvalue<'tcx>, depth: u32) -> Vec<ValPtr> {
+        match rv {
+            Rvalue::Use(op, _)
+            | Rvalue::Cast(CastKind::PtrToPtr | CastKind::Transmute, op, _) => {
+                self.trace_val(op, depth + 1)
+            }
+            Rvalue::RawPtr(..) | Rvalue::Ref(..) => {
+                self.trace_cap_rv(rv, depth).map(|s| vec![(0, s)]).unwrap_or_default()
+            }
+            Rvalue::Aggregate(kind, fields) => self.trace_aggregate(kind, fields, depth),
+            _ => Vec::new(),
+        }
+    }
+
+    fn trace_aggregate(
+        &self,
+        kind: &mir::AggregateKind<'tcx>,
+        fields: &rustc_index::IndexVec<rustc_abi::FieldIdx, Operand<'tcx>>,
+        depth: u32,
+    ) -> Vec<ValPtr> {
+        let cx = rustc_middle::ty::layout::LayoutCx::new(self.tcx, ty::TypingEnv::fully_monomorphized());
+        let (ty, variant, union_field) = match *kind {
+            mir::AggregateKind::Tuple => {
+                let tys: Vec<_> =
+                    fields.iter().map(|f| mono(self.tcx, self.instance, f.ty(self.body, self.tcx))).collect();
+                (Ty::new_tup(self.tcx, &tys), None, None)
+            }
+            mir::AggregateKind::Adt(did, vidx, args, _, active) => {
+                let adt = self.tcx.adt_def(did);
+                let ty = mono(self.tcx, self.instance, Ty::new_adt(self.tcx, adt, args));
+                if adt.is_enum() {
+                    (ty, Some(vidx), None)
+                } else if adt.is_union() {
+                    (ty, None, active)
+                } else {
+                    (ty, None, None)
+                }
+            }
+            _ => return Vec::new(),
+        };
+        let Ok(layout) = cx.layout_of(ty) else { return Vec::new() };
+        let vlayout = match variant {
+            Some(v) => layout.for_variant(&cx, v),
+            None => layout,
+        };
+        let mut out = Vec::new();
+        for (i, op) in fields.iter_enumerated() {
+            // A union aggregate has one operand, for its active field (offset 0).
+            let fo = if union_field.is_some() {
+                0
+            } else {
+                if i.index() >= vlayout.fields.count() {
+                    return Vec::new();
+                }
+                vlayout.fields.offset(i.index()).bytes()
+            };
+            for (o, s) in self.trace_val(op, depth + 1) {
+                let Some(o) = fo.checked_add(o) else { continue };
+                out.push((o, s));
+            }
+            if out.len() > MAX_VAL_PTRS {
+                return Vec::new();
+            }
+        }
+        out
+    }
+
     fn push(out: &mut Vec<StoreMark>, dst: PtrSym, src: (usize, Option<u64>)) {
         if dst.var.is_some() || src.0 == dst.arg {
             return;
@@ -626,6 +781,28 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             for st in &bb.statements {
                 let StatementKind::Assign(a) = &st.kind else { continue };
                 let (place, rv) = &**a;
+                // [LLM-generated] M7.2k: a store of a whole value holding pointers
+                // (`*q = Some(p)`, a struct or tuple, a `MaybeUninit`): one mark per
+                // pointer field that traces to an argument, at the field's offset.
+                if aggregate_enabled(self.tcx)
+                    && matches!(
+                        rv,
+                        Rvalue::Use(..) | Rvalue::Cast(CastKind::Transmute, ..) | Rvalue::Aggregate(..)
+                    )
+                {
+                    let pty = mono(self.tcx, self.instance, place.ty(self.body, self.tcx).ty);
+                    if !is_cap_ptr(pty)
+                        && let Some(dst) = self.trace_place_addr(*place, 0)
+                    {
+                        for (o, src) in self.trace_val_rv(rv, 0) {
+                            let mut d = dst;
+                            let Some(off) = d.off.checked_add(o) else { continue };
+                            d.off = off;
+                            Self::push(out, d, src);
+                        }
+                        continue;
+                    }
+                }
                 let op = match rv {
                     Rvalue::Use(op, _) | Rvalue::Cast(CastKind::PtrToPtr, op, _) => op,
                     _ => continue,
@@ -643,9 +820,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             let Some(t) = &bb.terminator else { continue };
             let mir::TerminatorKind::Call { func, args, .. } = &t.kind else { continue };
             // Only calls that pass two or more pointers can store one into another.
+            // [LLM-generated] M7.2k: with aggregate marks, a pointer-sized scalar value
+            // (`Option<&T>`, `Box<T>`) counts as a pointer too.
+            let agg = aggregate_enabled(self.tcx);
             let nptr = args
                 .iter()
-                .filter(|a| is_cap_ptr(mono(self.tcx, self.instance, a.node.ty(self.body, self.tcx))))
+                .filter(|a| {
+                    let t = mono(self.tcx, self.instance, a.node.ty(self.body, self.tcx));
+                    if agg { is_cap_scalar(self.tcx, t) } else { is_cap_ptr(t) }
+                })
                 .count();
             if nptr < 2 {
                 continue;
@@ -657,6 +840,18 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 let Some(mut dst) = self.op_ptr(&da.node, 0) else { continue };
                 let Some(o) = dst.off.checked_add(m.off) else { continue };
                 dst.off = o;
+                // [LLM-generated] M7.2k: the stored argument may be a value built here
+                // (`Some(p)`) that holds the pointer at an offset (0 for a pointer-sized
+                // scalar parameter).
+                if agg && m.src_deref.is_none() && self.trace_cap(&sa.node, 0).is_none() {
+                    for (o, src) in self.trace_val(&sa.node, 0) {
+                        let mut d = dst;
+                        let Some(off) = d.off.checked_add(o) else { continue };
+                        d.off = off;
+                        Self::push(out, d, src);
+                    }
+                    continue;
+                }
                 let src = match m.src_deref {
                     None => self.trace_cap(&sa.node, 0),
                     // The callee reads through its argument: the caller's operand

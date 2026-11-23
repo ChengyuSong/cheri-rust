@@ -2470,6 +2470,13 @@ options! {
         `fmt` methods and `compiler_builtins` stay excluded. Default: yes; `no` gives the \
         M7.2h output (user-crate marks only) and ignores `core`/`alloc` metadata marks. \
         Needs `-Zcheri-stores-into-marks`"),
+    cheri_stores_into_marks_aggregate: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2k: callee store marks also for stores of a whole value that \
+        holds a pointer (`*q = Some(p)`, `MaybeUninit::write(q, v)`, a struct or tuple \
+        with pointer fields): each pointer field that is a parameter (or a parameter of \
+        pointer-sized scalar type such as `Option<&T>` / `Box<T>`) gives a mark at the \
+        field's byte offset. Default: yes; `no` gives the M7.2j marks. Needs \
+        `-Zcheri-stores-into-marks`"),
     cheri_stores_into_marks_at_call: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.2j: at a direct call (in a user-crate function) to a callee \
         with callee store marks, emit the caller-side `mem.store_into_slot` fact right \
