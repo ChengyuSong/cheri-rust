@@ -2493,6 +2493,14 @@ options! {
         whose length is unknown is only counted (`MEM-BYTES unknown=`). User-crate \
         functions only, like `-Zcheri-store-into`. Default: yes; `no` emits nothing (the \
         M7.2l output)"),
+    cheri_noreuse: bool = (false, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2n: mark pointers that leave to a place no fact names with \
+        `mem.escape_unknown`(cap) for the late LLVM CHERI pass (which lowers it to a \
+        runtime note: the heap block holding cap is never reused): a byte copy of a \
+        pointer-holding value whose length is unknown, and each raw-pointer argument of \
+        an indirect call (fn pointer or `dyn` method) that is not the address of the \
+        caller's own frame. User-crate functions only, like `-Zcheri-store-into`. Needs \
+        the cheri_revoke runtime at link time. Default: no (nothing emitted)"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],

@@ -1442,6 +1442,8 @@ pub(crate) struct MemStats {
     /// whose length (or offset) is unknown (counted only).
     pub bytes_facts: u32,
     pub bytes_unknown: u32,
+    /// [LLM-generated] M7.2n: `mem.escape_unknown` facts emitted.
+    pub escape_unknown: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1979,6 +1981,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         );
         // [LLM-generated] M7.2m: a separate line, only when non-zero.
         let mut line = line;
+        // [LLM-generated] M7.2n: likewise only when non-zero.
+        if s.escape_unknown != 0 {
+            line.push_str(&format!(
+                "MEM-NOREUSE\t{}\tescape_unknown={}\n",
+                tcx.symbol_name(self.instance).name,
+                s.escape_unknown
+            ));
+        }
         if s.bytes_facts != 0 || s.bytes_unknown != 0 {
             line.push_str(&format!(
                 "MEM-BYTES\t{}\tfacts={}\tunknown={}\n",
@@ -2635,6 +2645,53 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             bx.mem_fact("mem.store_into", &[dest, cap]);
         }
         self.mem_stats.store_into += 1;
+    }
+
+    /// [LLM-generated] M7.2n: at an indirect call (fn pointer, or a `dyn` method), each
+    /// raw-pointer argument may be stored anywhere by a callee whose store marks
+    /// cannot be read: emit `mem.escape_unknown`(arg) before the call. An argument that
+    /// is the address of the caller's own frame gets no fact (a stack slot is never a
+    /// heap block, and the fact operand would keep the local in memory). References
+    /// are not marked. Same emit filter as the B2a facts.
+    pub(crate) fn mem_escape_unknown_at_call(
+        &mut self,
+        bx: &mut Bx,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        instance: Option<ty::Instance<'tcx>>,
+        llargs: &[Bx::Value],
+    ) {
+        if !self.noreuse_enabled() {
+            return;
+        }
+        if let Some(inst) = instance
+            && !matches!(inst.def, ty::InstanceKind::Virtual(..))
+        {
+            return;
+        }
+        if self.mem_store_into_args.len() != fn_abi.args.len() {
+            return;
+        }
+        let tcx = self.cx.tcx();
+        let mut i = 0usize;
+        let args = self.mem_store_into_args.clone();
+        for (k, arg) in fn_abi.args.iter().enumerate() {
+            let Some((width, _)) = Self::ffi_llvm_arg_span(&arg.mode) else { return };
+            let start = i;
+            i += width as usize;
+            if !matches!(arg.mode, PassMode::Direct(_) | PassMode::Pair(..)) {
+                continue;
+            }
+            let op = &args[k];
+            if !self.monomorphize(op.ty(self.mir, tcx)).is_raw_ptr() || self.at_call_dst_in_frame(op) {
+                continue;
+            }
+            let Some(&v) = llargs.get(start) else { continue };
+            if !Self::store_into_value_is_cap(bx, v) {
+                continue;
+            }
+            bx.mem_fact("mem.escape_unknown", &[v]);
+            self.mem_stats.escape_unknown += 1;
+        }
     }
 
     /// [LLM-generated] M7.2j: at a direct call to a callee with store marks
@@ -4603,6 +4660,9 @@ pub(crate) fn mem_op_claim<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 pub(crate) struct BytePlan {
     copies: FxHashMap<usize, Vec<(u64, mir::Local, u64)>>,
     unknown: u32,
+    /// [LLM-generated] M7.2n: for a copy of unknown length, the origins (local,
+    /// offset in it) of the pointers it may carry.
+    unknown_caps: FxHashMap<usize, Vec<(mir::Local, u64)>>,
 }
 
 /// [LLM-generated] M7.2m: at most this many pointers per copy / per buffer.
@@ -4611,6 +4671,31 @@ const MAX_BYTE_CAPS: usize = 8;
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     fn byte_copy_enabled(&self) -> bool {
         self.cx.tcx().sess.opts.unstable_opts.cheri_store_into_bytes && self.store_into_enabled()
+    }
+
+    /// [LLM-generated] M7.2n: `-Zcheri-noreuse`, with the B2a emit filter.
+    fn noreuse_enabled(&self) -> bool {
+        self.cx.tcx().sess.opts.unstable_opts.cheri_noreuse && self.store_into_enabled()
+    }
+
+    /// [LLM-generated] M7.2n: the pointer stored at byte `off` of local `l`
+    /// (the typed origin of a byte copy), as a value of type `cap_ty`.
+    fn byte_origin_cap(&mut self, bx: &mut Bx, l: mir::Local, off: u64, cap_ty: Bx::Type) -> Option<Bx::Value> {
+        match self.locals[l] {
+            LocalRef::Place(pr) => {
+                let a = if off == 0 {
+                    pr.val.llval
+                } else {
+                    bx.inbounds_gep(bx.cx().type_i8(), pr.val.llval, &[bx.cx().const_usize(off)])
+                };
+                Some(bx.load(cap_ty, a, Align::from_bytes(16).unwrap()))
+            }
+            LocalRef::Operand(op) if off == 0 => match op.val {
+                OperandValue::Immediate(v) => Some(v),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// [LLM-generated] M7.2m: after `copy_nonoverlapping::<u8>(src, dst, n)`, emit
@@ -4640,13 +4725,34 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// [LLM-generated] M7.2m: the facts of the planned copy `key` (a statement or a
     /// Call terminator of this body), `dst` being the copy's destination pointer.
     fn mem_byte_copy_emit(&mut self, bx: &mut Bx, key: usize, dst: Bx::Value) {
-        if !self.byte_copy_enabled() {
+        let noreuse = self.noreuse_enabled();
+        if !self.byte_copy_enabled() && !noreuse {
             return;
         }
         if self.mem_byte_plan.is_none() {
             let plan = self.byte_copy_plan();
             self.mem_stats.bytes_unknown += plan.unknown;
             self.mem_byte_plan = Some(plan);
+        }
+        // [LLM-generated] M7.2n: a copy of unknown length: each pointer it may carry
+        // escapes to an unknown place (`mem.escape_unknown`, cap from its origin).
+        if noreuse
+            && Self::store_into_value_is_cap(bx, dst)
+            && let Some(origins) =
+                self.mem_byte_plan.as_ref().and_then(|p| p.unknown_caps.get(&key)).cloned()
+        {
+            let cap_ty = bx.cx().val_ty(dst);
+            for (l, off) in origins {
+                if let Some(cap) = self.byte_origin_cap(bx, l, off, cap_ty)
+                    && Self::store_into_value_is_cap(bx, cap)
+                {
+                    bx.mem_fact("mem.escape_unknown", &[cap]);
+                    self.mem_stats.escape_unknown += 1;
+                }
+            }
+        }
+        if !self.byte_copy_enabled() {
+            return;
         }
         let Some(entries) = self.mem_byte_plan.as_ref().and_then(|p| p.copies.get(&key)).cloned()
         else {
@@ -4810,6 +4916,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
         let Some(n) = self.byte_const_usize(&c.count, 0) else {
             plan.unknown += 1;
+            plan.unknown_caps.insert(key, held.iter().map(|&(_, ol, oo)| (ol, oo)).collect());
             return;
         };
         let entries: Vec<(u64, mir::Local, u64)> = held
