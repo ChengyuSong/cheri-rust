@@ -136,6 +136,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     None,
                     PreserveCheriTags::Unknown,
                 );
+                // [LLM-generated] M7.2m: a byte copy out of a pointer-holding value.
+                self.mem_byte_copy_after(bx, statement, dst_val.immediate());
             }
             mir::StatementKind::FakeRead(..)
             | mir::StatementKind::AscribeUserType(..)
