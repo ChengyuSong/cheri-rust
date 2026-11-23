@@ -95,10 +95,26 @@ fn xcrate_item(tcx: TyCtxt<'_>, def_id: rustc_span::def_id::DefId) -> bool {
         && !tcx.generics_of(def_id).requires_monomorphization(tcx)
 }
 
+/// [LLM-generated] M7.2i: whether `core` / `alloc` functions give marks
+/// (`-Zcheri-stores-into-marks-lib`).
+pub fn lib_enabled(tcx: TyCtxt<'_>) -> bool {
+    enabled(tcx) && tcx.sess.opts.unstable_opts.cheri_stores_into_marks_lib
+}
+
+/// [LLM-generated] M7.2i: `core` or `alloc` (the library crates whose marks
+/// `-Zcheri-stores-into-marks-lib` turns on).
+fn is_lib_crate(tcx: TyCtxt<'_>, krate: rustc_span::def_id::CrateNum) -> bool {
+    matches!(tcx.crate_name(krate).as_str(), "core" | "alloc")
+}
+
 /// [LLM-generated] M7.2h: the marks recorded in the metadata of the upstream crate
 /// that defines `def_id` (empty for local, generic or unmarked items).
 fn extern_marks(tcx: TyCtxt<'_>, def_id: rustc_span::def_id::DefId) -> Vec<StoreMark> {
     if def_id.is_local() || !xcrate_enabled(tcx) || !xcrate_item(tcx, def_id) {
+        return Vec::new();
+    }
+    // [LLM-generated] M7.2i: `core` / `alloc` metadata marks only with the lib switch.
+    if !lib_enabled(tcx) && is_lib_crate(tcx, def_id.krate) {
         return Vec::new();
     }
     tcx.cheri_store_marks(def_id)
@@ -140,13 +156,27 @@ pub(crate) fn provide(providers: &mut rustc_middle::query::Providers) {
 
 /// The same filter as the body's own `store_into` facts: user-crate items only, not
 /// core / alloc / compiler_builtins, the panic handler or `fmt` methods.
+///
+/// [LLM-generated] M7.2i: with `-Zcheri-stores-into-marks-lib` (default yes) the
+/// marks (unlike the body facts) also come from items of `core` and `alloc`: in those
+/// crates themselves, and for their generic or inline functions instantiated in this
+/// crate. `compiler_builtins`, the panic handler and `fmt` methods stay excluded.
 fn filter_ok(tcx: TyCtxt<'_>, def_id: rustc_span::def_id::DefId) -> bool {
     if !def_id.is_local() {
-        return false;
-    }
-    let name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
-    if matches!(name.as_str(), "core" | "alloc" | "compiler_builtins") {
-        return false;
+        // [LLM-generated] M7.2i: an upstream item is analyzed here only when it is a
+        // `core` / `alloc` function (its MIR is read; other upstream crates are
+        // unchanged: their non-generic functions bring metadata marks).
+        if !(lib_enabled(tcx) && is_lib_crate(tcx, def_id.krate)) {
+            return false;
+        }
+    } else {
+        let name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
+        if name.as_str() == "compiler_builtins" {
+            return false;
+        }
+        if matches!(name.as_str(), "core" | "alloc") && !lib_enabled(tcx) {
+            return false;
+        }
     }
     if tcx.lang_items().panic_impl() == Some(def_id) {
         return false;
