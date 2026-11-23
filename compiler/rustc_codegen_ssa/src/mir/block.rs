@@ -1521,6 +1521,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             _ => span_bug!(fn_span, "no instance or llfn for call"),
         };
         self.set_debug_loc(bx, source_info);
+        // [LLM-generated] M7.2n: raw pointers handed to an indirect callee.
+        self.mem_escape_unknown_at_call(bx, fn_abi, instance, &llargs);
         helper.do_call(
             self,
             bx,
