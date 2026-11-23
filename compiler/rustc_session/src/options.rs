@@ -2484,6 +2484,15 @@ options! {
         `!mem.stores_into.at_call`), so it survives LLVM inlining. Destinations in the \
         caller's own frame get no fact. Default: yes; `no` gives the M7.2i output. \
         Needs `-Zcheri-stores-into-marks` and `-Zcheri-store-into`"),
+    cheri_store_into_bytes: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2m: treat a byte copy (`copy_nonoverlapping::<u8>`) out of a \
+        value that holds pointers as a store of those pointers into the destination at \
+        the same relative offsets, and follow them through same-function byte buffers \
+        such a copy filled (plain moves and `black_box`): emit `mem.store_into_slot`(dst, \
+        off, cap) facts tagged `!mem.store_into.bytes` for the late LLVM CHERI pass. A copy \
+        whose length is unknown is only counted (`MEM-BYTES unknown=`). User-crate \
+        functions only, like `-Zcheri-store-into`. Default: yes; `no` emits nothing (the \
+        M7.2l output)"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],

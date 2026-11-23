@@ -1438,6 +1438,10 @@ pub(crate) struct MemStats {
     /// were not a nameable local (or had no memory address).
     pub store_into: u32,
     pub store_into_skipped: u32,
+    /// [LLM-generated] M7.2m: byte-copy facts emitted, and byte copies of pointers
+    /// whose length (or offset) is unknown (counted only).
+    pub bytes_facts: u32,
+    pub bytes_unknown: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1973,6 +1977,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             s.store_into,
             s.store_into_skipped,
         );
+        // [LLM-generated] M7.2m: a separate line, only when non-zero.
+        let mut line = line;
+        if s.bytes_facts != 0 || s.bytes_unknown != 0 {
+            line.push_str(&format!(
+                "MEM-BYTES\t{}\tfacts={}\tunknown={}\n",
+                tcx.symbol_name(self.instance).name,
+                s.bytes_facts,
+                s.bytes_unknown
+            ));
+        }
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = f.write_all(line.as_bytes());
@@ -4136,6 +4150,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         llargs: &[Bx::Value],
         llret: Option<Bx::Value>,
     ) {
+        // [LLM-generated] M7.2m: `ptr::copy_nonoverlapping::<u8>` left as a call (O1).
+        if let Some(inst) = instance
+            && llargs.len() >= 2
+            && self.is_copy_nonoverlapping_fn(inst)
+        {
+            let key = self.mem_byte_term;
+            self.mem_byte_copy_emit(bx, key, llargs[1]);
+        }
         if !self.store_into_enabled() {
             self.mem_store_into_ret = None;
             self.mem_store_into_arg0 = None;
@@ -4572,4 +4594,408 @@ pub(crate) fn mem_op_claim<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         return ptr;
     }
     bx.mem_claim(ptr, bytes, CK_MEM_OP | CF_UNTRUSTED)
+}
+
+/// [LLM-generated] M7.2m: byte-copy store_into plan of one body. Key: address of a
+/// `copy_nonoverlapping` statement of this MIR body. Value: (destination offset,
+/// origin local, offset in that local) for each pointer the copy carries.
+#[derive(Default)]
+pub(crate) struct BytePlan {
+    copies: FxHashMap<usize, Vec<(u64, mir::Local, u64)>>,
+    unknown: u32,
+}
+
+/// [LLM-generated] M7.2m: at most this many pointers per copy / per buffer.
+const MAX_BYTE_CAPS: usize = 8;
+
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    fn byte_copy_enabled(&self) -> bool {
+        self.cx.tcx().sess.opts.unstable_opts.cheri_store_into_bytes && self.store_into_enabled()
+    }
+
+    /// [LLM-generated] M7.2m: after `copy_nonoverlapping::<u8>(src, dst, n)`, emit
+    /// `mem.store_into_slot(dst, off, cap)` with `!mem.store_into.bytes` for each
+    /// pointer the planned copy carries. `cap` is reloaded from the pointer's origin
+    /// (the typed local it was first copied out of), so it is the stored pointer
+    /// value, not a byte-buffer reload. The late pass compares the slot with it
+    /// exactly before nulling, so a stale origin only costs a missed clear.
+    pub(crate) fn mem_byte_copy_after(
+        &mut self,
+        bx: &mut Bx,
+        stmt: &mir::Statement<'tcx>,
+        dst: Bx::Value,
+    ) {
+        let key = stmt as *const mir::Statement<'tcx> as usize;
+        self.mem_byte_copy_emit(bx, key, dst);
+    }
+
+    fn is_copy_nonoverlapping_fn(&self, instance: ty::Instance<'tcx>) -> bool {
+        let s = rustc_middle::ty::print::with_no_trimmed_paths!(
+            self.cx.tcx().def_path_str(instance.def_id())
+        );
+        s.rsplit("::").next() == Some("copy_nonoverlapping")
+            && (s.contains("::ptr::") || s.contains("::intrinsics::"))
+    }
+
+    /// [LLM-generated] M7.2m: the facts of the planned copy `key` (a statement or a
+    /// Call terminator of this body), `dst` being the copy's destination pointer.
+    fn mem_byte_copy_emit(&mut self, bx: &mut Bx, key: usize, dst: Bx::Value) {
+        if !self.byte_copy_enabled() {
+            return;
+        }
+        if self.mem_byte_plan.is_none() {
+            let plan = self.byte_copy_plan();
+            self.mem_stats.bytes_unknown += plan.unknown;
+            self.mem_byte_plan = Some(plan);
+        }
+        let Some(entries) = self.mem_byte_plan.as_ref().and_then(|p| p.copies.get(&key)).cloned()
+        else {
+            return;
+        };
+        if !Self::store_into_value_is_cap(bx, dst) {
+            return;
+        }
+        let cap_ty = bx.cx().val_ty(dst);
+        for (rel, l, off) in entries {
+            let cap = match self.locals[l] {
+                LocalRef::Place(pr) => {
+                    let a = if off == 0 {
+                        pr.val.llval
+                    } else {
+                        bx.inbounds_gep(bx.cx().type_i8(), pr.val.llval, &[bx.cx().const_usize(off)])
+                    };
+                    bx.load(cap_ty, a, Align::from_bytes(16).unwrap())
+                }
+                LocalRef::Operand(op) if off == 0 => match op.val {
+                    OperandValue::Immediate(v) => v,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if !Self::store_into_value_is_cap(bx, cap) {
+                continue;
+            }
+            let o = bx.cx().const_u64(rel);
+            bx.mem_fact_md("mem.store_into_slot", &[dst, o, cap], &["mem.store_into.bytes"]);
+            self.mem_stats.store_into += 1;
+            self.mem_stats.bytes_facts += 1;
+        }
+    }
+
+    /// [LLM-generated] M7.2m: one pass over the body in reverse postorder. A byte
+    /// copy (`copy_nonoverlapping::<u8>` / `<i8>`) whose source is (a field of) a
+    /// local carries the pointers of that local's type in the copied range, and the
+    /// pointers an earlier byte copy put into that local (`taint`). A byte copy into a
+    /// local, a whole-local move or copy, and `black_box` pass them on. Loops are not
+    /// iterated; `StorageDead` drops a local's entries and its use as an origin.
+    fn byte_copy_plan(&self) -> BytePlan {
+        let mut plan = BytePlan::default();
+        let mut taint: FxHashMap<mir::Local, Vec<(u64, mir::Local, u64)>> = Default::default();
+        let mut dead: FxHashSet<mir::Local> = Default::default();
+        let mir = self.mir;
+        for (_bb, data) in mir::traversal::reverse_postorder(mir) {
+            for st in &data.statements {
+                match &st.kind {
+                    StatementKind::StorageDead(l) => {
+                        dead.insert(*l);
+                        taint.remove(l);
+                    }
+                    StatementKind::StorageLive(l) => {
+                        dead.remove(l);
+                    }
+                    StatementKind::Assign(a) => {
+                        let (place, rv) = &**a;
+                        let Some(d) = place.as_local() else { continue };
+                        let src = match rv {
+                            Rvalue::Use(Operand::Copy(q) | Operand::Move(q), _)
+                            | Rvalue::Cast(
+                                mir::CastKind::Transmute,
+                                Operand::Copy(q) | Operand::Move(q),
+                                _,
+                            ) => q.as_local(),
+                            _ => None,
+                        };
+                        match src.and_then(|q| taint.get(&q).cloned()) {
+                            Some(t) => {
+                                taint.insert(d, t);
+                            }
+                            None => {
+                                taint.remove(&d);
+                            }
+                        }
+                    }
+                    StatementKind::Intrinsic(i) => {
+                        let mir::NonDivergingIntrinsic::CopyNonOverlapping(c) = &**i else {
+                            continue;
+                        };
+                        let key = st as *const mir::Statement<'tcx> as usize;
+                        self.byte_copy_step(key, c, &mut taint, &dead, &mut plan);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(term) = &data.terminator
+                && let mir::TerminatorKind::Call { func, args, .. } = &term.kind
+                && args.len() == 3
+                && self.callee_is(func, &["copy_nonoverlapping"])
+            {
+                let c = mir::CopyNonOverlapping {
+                    src: args[0].node.clone(),
+                    dst: args[1].node.clone(),
+                    count: args[2].node.clone(),
+                };
+                let key = term as *const mir::Terminator<'tcx> as usize;
+                self.byte_copy_step(key, &c, &mut taint, &dead, &mut plan);
+            }
+            if let Some(term) = &data.terminator
+                && let mir::TerminatorKind::Call { func, args, destination, .. } = &term.kind
+                && let Some(d) = destination.as_local()
+            {
+                let mut through = None;
+                if self.callee_is(func, &["black_box"])
+                    && args.len() == 1
+                    && let Operand::Copy(q) | Operand::Move(q) = &args[0].node
+                    && let Some(q) = q.as_local()
+                {
+                    through = taint.get(&q).cloned();
+                }
+                match through {
+                    Some(t) => {
+                        taint.insert(d, t);
+                    }
+                    None => {
+                        taint.remove(&d);
+                    }
+                }
+            }
+        }
+        plan
+    }
+
+    fn byte_copy_step(
+        &self,
+        key: usize,
+        c: &mir::CopyNonOverlapping<'tcx>,
+        taint: &mut FxHashMap<mir::Local, Vec<(u64, mir::Local, u64)>>,
+        dead: &FxHashSet<mir::Local>,
+        plan: &mut BytePlan,
+    ) {
+        let tcx = self.cx.tcx();
+        let sty = self.monomorphize(c.src.ty(self.mir, tcx));
+        let Some(elem) = sty.builtin_deref(true) else { return };
+        if !matches!(self.monomorphize(elem).kind(), ty::Uint(ty::UintTy::U8) | ty::Int(ty::IntTy::I8)) {
+            return;
+        }
+        let Some((sl, k)) = self.byte_addr_of(&c.src, 0) else { return };
+        if dead.contains(&sl) {
+            return;
+        }
+        // Pointers in the source local: its own (typed) ones, then copied-in ones.
+        let mut held: Vec<(u64, mir::Local, u64)> = Vec::new();
+        let mut typed = Vec::new();
+        self.byte_cap_offsets(self.monomorphize(self.mir.local_decls[sl].ty), 0, &mut typed, 0);
+        for o in typed {
+            held.push((o, sl, o));
+        }
+        if let Some(t) = taint.get(&sl) {
+            for &(o, ol, oo) in t {
+                if !dead.contains(&ol) && held.len() < MAX_BYTE_CAPS {
+                    held.push((o, ol, oo));
+                }
+            }
+        }
+        held.retain(|&(o, ..)| o >= k);
+        if held.is_empty() {
+            return;
+        }
+        let Some(n) = self.byte_const_usize(&c.count, 0) else {
+            plan.unknown += 1;
+            return;
+        };
+        let entries: Vec<(u64, mir::Local, u64)> = held
+            .into_iter()
+            .filter(|&(o, ..)| o + 16 <= k + n)
+            .map(|(o, ol, oo)| (o - k, ol, oo))
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        if let Some((dl, kd)) = self.byte_addr_of(&c.dst, 0) {
+            let t = taint.entry(dl).or_default();
+            for &(rel, ol, oo) in &entries {
+                let e = (kd + rel, ol, oo);
+                if t.len() < MAX_BYTE_CAPS && !t.contains(&e) {
+                    t.push(e);
+                }
+            }
+        }
+        plan.copies.insert(key, entries);
+    }
+
+    /// [LLM-generated] M7.2m: byte offsets of the pointers (references, raw data
+    /// pointers, `Box`, pointer-scalar wrappers; not fn pointers) in a value of type
+    /// `ty`, from its layout. Enums with more than one variant only when the whole
+    /// value is one pointer scalar.
+    fn byte_cap_offsets(&self, ty: Ty<'tcx>, base: u64, out: &mut Vec<u64>, depth: u32) {
+        if depth > 6 || out.len() >= MAX_BYTE_CAPS || ty.is_fn_ptr() {
+            return;
+        }
+        let layout = self.cx.layout_of(ty);
+        if let rustc_abi::BackendRepr::Scalar(s) = layout.backend_repr
+            && matches!(s.primitive(), rustc_abi::Primitive::Pointer(_))
+        {
+            if !matches!(ty.kind(), ty::FnPtr(..)) {
+                out.push(base);
+            }
+            return;
+        }
+        if !matches!(layout.variants, rustc_abi::Variants::Single { .. }) {
+            return;
+        }
+        match &layout.fields {
+            rustc_abi::FieldsShape::Primitive => {}
+            rustc_abi::FieldsShape::Array { stride, count } => {
+                if *count == 0 || *count > MAX_BYTE_CAPS as u64 {
+                    return;
+                }
+                let elem = layout.field(self.cx, 0).ty;
+                for i in 0..*count {
+                    self.byte_cap_offsets(elem, base + i * stride.bytes(), out, depth + 1);
+                }
+            }
+            rustc_abi::FieldsShape::Union(_) | rustc_abi::FieldsShape::Arbitrary { .. } => {
+                for i in 0..layout.fields.count() {
+                    let f = layout.field(self.cx, i);
+                    self.byte_cap_offsets(f.ty, base + layout.fields.offset(i).bytes(), out, depth + 1);
+                }
+            }
+        }
+    }
+
+    /// [LLM-generated] M7.2m: the (local, byte offset) a pointer operand points to,
+    /// through `&raw [mut|const] l.f`, `&l.f`, pointer casts, copies of
+    /// single-assigned temps, `as_ptr` / `as_mut_ptr` calls and a constant `offset`.
+    fn byte_addr_of(&self, op: &Operand<'tcx>, depth: u32) -> Option<(mir::Local, u64)> {
+        if depth > 8 {
+            return None;
+        }
+        let (def, call) = self.byte_local_def(op)?;
+        if let Some((func, args)) = call {
+            if self.callee_is(func, &["as_ptr", "as_mut_ptr"]) && args.len() == 1 {
+                return self.byte_addr_of(&args[0].node, depth + 1);
+            }
+            return None;
+        }
+        match def? {
+            Rvalue::Ref(_, _, q) | Rvalue::RawPtr(_, q) => self.byte_place_offset(*q, depth),
+            Rvalue::Use(o, _) | Rvalue::Cast(_, o, _) => self.byte_addr_of(o, depth + 1),
+            Rvalue::BinaryOp(mir::BinOp::Offset, b) => {
+                let (base, off) = &**b;
+                let tcx = self.cx.tcx();
+                let k = off.constant().and_then(|c| {
+                    self.monomorphize(c.const_).try_eval_target_usize(tcx, self.cx.typing_env())
+                })?;
+                let pty = self.monomorphize(base.ty(self.mir, tcx));
+                let esz = self.ptr_pointee_size(pty)?;
+                let (bl, bo) = self.byte_addr_of(base, depth + 1)?;
+                Some((bl, bo + k.checked_mul(esz)?))
+            }
+            _ => None,
+        }
+    }
+
+    /// [LLM-generated] M7.2m: the single definition of a non-argument local operand:
+    /// an assignment of the whole local, or a call result.
+    fn byte_local_def(
+        &self,
+        op: &Operand<'tcx>,
+    ) -> Option<(
+        Option<&'tcx Rvalue<'tcx>>,
+        Option<(&'tcx Operand<'tcx>, &'tcx [rustc_span::Spanned<Operand<'tcx>>])>,
+    )> {
+        let (Operand::Copy(p) | Operand::Move(p)) = op else { return None };
+        let l = p.as_local()?;
+        if l.as_usize() <= self.mir.arg_count {
+            return None;
+        }
+        let mir: &'tcx mir::Body<'tcx> = self.mir;
+        let mut def: Option<&'tcx Rvalue<'tcx>> = None;
+        let mut call: Option<(&'tcx Operand<'tcx>, &'tcx [rustc_span::Spanned<Operand<'tcx>>])> = None;
+        let mut n = 0;
+        for data in mir.basic_blocks.iter() {
+            for st in &data.statements {
+                if let StatementKind::Assign(a) = &st.kind
+                    && a.0.local == l
+                {
+                    n += 1;
+                    if a.0.projection.is_empty() {
+                        def = Some(&a.1);
+                    }
+                }
+            }
+            if let Some(t) = &data.terminator
+                && let mir::TerminatorKind::Call { func, args, destination, .. } = &t.kind
+                && destination.local == l
+            {
+                n += 1;
+                if destination.projection.is_empty() {
+                    call = Some((func, &args[..]));
+                }
+            }
+        }
+        if n != 1 || (def.is_none() && call.is_none()) {
+            return None;
+        }
+        Some((def, call))
+    }
+
+    /// [LLM-generated] M7.2m: a constant `usize` operand: a MIR constant, a copy of a
+    /// single-assigned one, or a `size_of::<T>()` call (left as a call at O1).
+    fn byte_const_usize(&self, op: &Operand<'tcx>, depth: u32) -> Option<u64> {
+        let tcx = self.cx.tcx();
+        if let Operand::Constant(ct) = op {
+            return self.monomorphize(ct.const_).try_eval_target_usize(tcx, self.cx.typing_env());
+        }
+        if depth > 4 {
+            return None;
+        }
+        let (def, call) = self.byte_local_def(op)?;
+        if let Some((func, args)) = call {
+            if !args.is_empty() || !self.callee_is(func, &["size_of"]) {
+                return None;
+            }
+            let (_, gargs) = func.const_fn_def()?;
+            let t = gargs.types().next()?;
+            return Some(self.cx.layout_of(self.monomorphize(t)).size.bytes());
+        }
+        match def? {
+            Rvalue::Use(o, _) => self.byte_const_usize(o, depth + 1),
+            _ => None,
+        }
+    }
+
+    /// [LLM-generated] M7.2m: byte offset of `l.f.g` (field projections only) in `l`.
+    /// A leading `Deref` of a pointer local (`&raw const (*r).f`, an inlined
+    /// `as_ptr`) continues at what `r` points to.
+    fn byte_place_offset(&self, q: mir::Place<'tcx>, depth: u32) -> Option<(mir::Local, u64)> {
+        let mut ty = self.monomorphize(self.mir.local_decls[q.local].ty);
+        let mut proj = &q.projection[..];
+        let (mut base, mut off) = (q.local, 0u64);
+        if let [mir::ProjectionElem::Deref, rest @ ..] = proj {
+            let r = Operand::Copy(mir::Place::from(q.local));
+            (base, off) = self.byte_addr_of(&r, depth + 1)?;
+            ty = self.monomorphize(ty.builtin_deref(true)?);
+            proj = rest;
+        }
+        for e in proj.iter() {
+            let mir::ProjectionElem::Field(f, fty) = e else { return None };
+            let layout = self.cx.layout_of(ty);
+            if !matches!(layout.variants, rustc_abi::Variants::Single { .. }) {
+                return None;
+            }
+            off += layout.fields.offset(f.as_usize()).bytes();
+            ty = self.monomorphize(*fty);
+        }
+        Some((base, off))
+    }
 }

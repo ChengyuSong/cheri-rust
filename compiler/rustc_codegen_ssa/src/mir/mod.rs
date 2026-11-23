@@ -185,6 +185,11 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
     mem_store_into_ret: Option<mir::Place<'tcx>>,
     mem_store_into_arg0: Option<mir::Operand<'tcx>>,
     mem_store_into_args: Vec<mir::Operand<'tcx>>,
+    /// [LLM-generated] M7.2m: byte-copy store_into plan of this body, built at the
+    /// first `copy_nonoverlapping` statement.
+    mem_byte_plan: Option<mem_annot::BytePlan>,
+    /// [LLM-generated] M7.2m: address of the Call terminator being lowered.
+    mem_byte_term: usize,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -349,6 +354,8 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         mem_store_into_ret: None,
         mem_store_into_arg0: None,
         mem_store_into_args: Vec::new(),
+        mem_byte_plan: None,
+        mem_byte_term: 0,
     };
     fx.cheri_sites = fx.find_cheri_index_sites();
     if !cx.tcx().sess.opts.unstable_opts.cheri_loan_ends {
