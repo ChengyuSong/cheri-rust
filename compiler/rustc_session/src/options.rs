@@ -2578,6 +2578,14 @@ options! {
         `no` builds the MIR unchanged. The MIR is built in the crate that defines the \
         call (with build-std: the user's flags); also needs `-Zcheri-spec`, \
         `-Zcheri-wipe-alloc-hints`, `-Zcheri-wipe-cap-words` and `-Zcheri-annotate`"),
+    cheri_spec_vacates: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.3: lower `vacates(ty, block, from, to)` specs (on the library's \
+        Vec / VecDeque / BTree removal methods) to a wipe of the vacated element bytes \
+        before each return of the annotated function, so stale capabilities past `len` \
+        are cleared. Default: yes; `no` builds the MIR unchanged. The MIR is built in the \
+        crate that defines the function (with build-std: the user's flags); also needs \
+        `-Zcheri-spec`, `-Zcheri-wipe-alloc-hints`, `-Zcheri-wipe-cap-words` and \
+        `-Zcheri-annotate`"),
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),

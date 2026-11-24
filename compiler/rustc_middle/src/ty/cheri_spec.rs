@@ -21,6 +21,11 @@
 //! `relocates(block, size, keep [, alloc, free])`, `retains(p)`, `borrows(p)`,
 //! `stores(p, into)`. Statement form (on a `let` whose initializer is a call to a
 //! `relocates` function): `live(block, bytes, held [, ty])`.
+//!
+//! [LLM-generated] M7.3 additions: the form `vacates(ty, block, from, to)`, the atom
+//! `old(expr)` (only inside `vacates`) and the operator `%` (same precedence as `*`).
+//! `block` may also be written `&place` there (the address of a field, e.g. a node's
+//! key array). See [`CheriSpec::Vacates`].
 
 use rustc_attr_ir::find_attr;
 use rustc_hir::def::DefKind;
@@ -51,6 +56,8 @@ pub enum SpecBinOp {
     Add,
     Sub,
     Mul,
+    /// [LLM-generated] M7.3: `a % b` (unsigned; codegen uses `max(b, 1)` as the divisor).
+    Rem,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +68,9 @@ pub enum SpecExpr {
     /// `size_of_val(*place)`: the size of the pointee of `place` (sized pointees only).
     SizeOfPointee(SpecPlace),
     Bin(SpecBinOp, Box<SpecExpr>, Box<SpecExpr>),
+    /// [LLM-generated] M7.3: `old(expr)`: `expr` read on entry to the function (only in
+    /// `vacates`; every other operand of a `vacates` bound is read on return).
+    Old(Box<SpecExpr>),
 }
 
 /// `name(arg, ...)`: a sibling method of the same trait, with the caller's parameter
@@ -107,6 +117,15 @@ pub enum CheriSpec {
     Retains(Symbol),
     Borrows(Symbol),
     Stores { param: Symbol, into: SpecPlace },
+    /// [LLM-generated] M7.3 body spec: on every normal return the bytes `[from, to)` of
+    /// `block` hold no live value; they held (moved-out or dropped) values of `ty`.
+    /// `block` is read on entry (it must not change); `from` and `to` are read on
+    /// return except for their `old(..)` parts, read on entry. `addr`: `block` was
+    /// written `&place`, the address of that place, not its pointer value. The
+    /// function's own MIR gets a `WipeDead` before each return, so the wipe survives
+    /// MIR inlining. The spec is trusted: `from <= to` on every return and the range
+    /// lies in the block's allocation whenever it is non-empty.
+    Vacates { ty: SpecTy, block: SpecPlace, addr: bool, from: SpecExpr, to: SpecExpr },
 }
 
 impl CheriSpec {
@@ -119,6 +138,7 @@ impl CheriSpec {
             CheriSpec::Retains(_) => "retains",
             CheriSpec::Borrows(_) => "borrows",
             CheriSpec::Stores { .. } => "stores",
+            CheriSpec::Vacates { .. } => "vacates",
         }
     }
 }
@@ -164,7 +184,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
         } else if c == ':' && i + 1 < b.len() && b[i + 1] == ':' {
             out.push(Tok::ColCol);
             i += 2;
-        } else if "(),=.*+-<>".contains(c) {
+        } else if "(),=.*+-<>%&".contains(c) {
             out.push(Tok::Punct(c));
             i += 1;
         } else {
@@ -258,6 +278,12 @@ impl P {
                 self.expect_punct(')')?;
                 Ok(SpecExpr::SizeOf(t))
             }
+            Some(Tok::Ident(s)) if s == "old" && self.t.get(self.i + 1) == Some(&Tok::Punct('(')) => {
+                self.i += 2;
+                let e = self.expr()?;
+                self.expect_punct(')')?;
+                Ok(SpecExpr::Old(Box::new(e)))
+            }
             Some(Tok::Ident(s)) if s == "size_of_val" => {
                 self.i += 1;
                 self.expect_punct('(')?;
@@ -272,11 +298,17 @@ impl P {
     }
     fn term(&mut self) -> Result<SpecExpr, String> {
         let mut l = self.atom()?;
-        while self.eat_punct('*') {
+        loop {
+            let op = if self.eat_punct('*') {
+                SpecBinOp::Mul
+            } else if self.eat_punct('%') {
+                SpecBinOp::Rem
+            } else {
+                return Ok(l);
+            };
             let r = self.atom()?;
-            l = SpecExpr::Bin(SpecBinOp::Mul, Box::new(l), Box::new(r));
+            l = SpecExpr::Bin(op, Box::new(l), Box::new(r));
         }
-        Ok(l)
     }
     fn expr(&mut self) -> Result<SpecExpr, String> {
         let mut l = self.term()?;
@@ -324,13 +356,15 @@ pub fn parse_spec(s: &str) -> Result<CheriSpec, String> {
         "live" => &["block", "bytes", "held", "ty"],
         "retains" | "borrows" => &[],
         "stores" => &["into"],
+        "vacates" => &["ty", "block", "from", "to"],
         _ => {
             return Err(format!(
-                "unknown spec `{form}`; expected one of `frees`, `dealloc_of`, `relocates`, `live`, `retains`, `borrows`, `stores`"
+                "unknown spec `{form}`; expected one of `frees`, `dealloc_of`, `relocates`, `live`, `retains`, `borrows`, `stores`, `vacates`"
             ));
         }
     };
     let mut values: Vec<(String, Value)> = Vec::new();
+    let mut block_addr = false;
     enum Value {
         E(SpecExpr),
         T(SpecTy),
@@ -350,6 +384,10 @@ pub fn parse_spec(s: &str) -> Result<CheriSpec, String> {
                 keys.push((k.clone(), values.len()));
                 let v = match k.as_str() {
                     "ty" | "or" | "held" => Value::T(p.ty()?),
+                    "block" if form == "vacates" && p.eat_punct('&') => {
+                        block_addr = true;
+                        Value::P(p.place()?)
+                    }
                     "block" | "into" => Value::P(p.place()?),
                     "alloc" | "free" => Value::C(p.call()?),
                     _ => Value::E(p.expr()?),
@@ -456,9 +494,44 @@ pub fn parse_spec(s: &str) -> Result<CheriSpec, String> {
                 into: as_p(need(take("into"), "into")?),
             }
         }
+        "vacates" => {
+            only_bare(&[])?;
+            CheriSpec::Vacates {
+                ty: as_t(need(take("ty"), "ty")?),
+                block: as_p(need(take("block"), "block")?),
+                addr: block_addr,
+                from: as_e(need(take("from"), "from")?),
+                to: as_e(need(take("to"), "to")?),
+            }
+        }
         _ => unreachable!(),
     };
+    if !matches!(spec, CheriSpec::Vacates { .. }) && spec_has_old(&spec) {
+        return Err(format!("`old(..)` is only allowed in `vacates`, not in `{form}`"));
+    }
     Ok(spec)
+}
+
+/// [LLM-generated] M7.3: does `e` contain `old(..)`?
+pub fn expr_has_old(e: &SpecExpr) -> bool {
+    match e {
+        SpecExpr::Old(_) => true,
+        SpecExpr::Bin(_, a, b) => expr_has_old(a) || expr_has_old(b),
+        SpecExpr::Lit(_) | SpecExpr::Place(_) | SpecExpr::SizeOf(_) | SpecExpr::SizeOfPointee(_) => {
+            false
+        }
+    }
+}
+
+fn spec_has_old(s: &CheriSpec) -> bool {
+    match s {
+        CheriSpec::Frees { size, .. } => expr_has_old(size),
+        CheriSpec::DeallocOf { size, .. } => size.as_ref().is_some_and(expr_has_old),
+        CheriSpec::Relocates { size, keep, .. } => expr_has_old(size) || expr_has_old(keep),
+        CheriSpec::Live { bytes, .. } => expr_has_old(bytes),
+        CheriSpec::Vacates { from, to, .. } => expr_has_old(from) || expr_has_old(to),
+        CheriSpec::Retains(_) | CheriSpec::Borrows(_) | CheriSpec::Stores { .. } => false,
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -721,6 +794,7 @@ pub fn check_expr<'tcx>(
             check_expr(tcx, def_id, params, a, local_ty)?;
             check_expr(tcx, def_id, params, b, local_ty)
         }
+        SpecExpr::Old(a) => check_expr(tcx, def_id, params, a, local_ty),
     }
 }
 
@@ -803,6 +877,16 @@ pub fn check_fn_spec<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, spec: &CheriSpec) -
                 r(Err(format!("no parameter named `{param}`")));
             }
             r(check_block(tcx, &params, into, &no_local));
+        }
+        CheriSpec::Vacates { ty, block, addr, from, to } => {
+            r(spec_ty(tcx, def_id, &params, ty, &no_local).map(|_| ()));
+            if *addr {
+                r(place_ty_any(tcx, &params, block, &no_local).map(|_| ()));
+            } else {
+                r(check_block(tcx, &params, block, &no_local));
+            }
+            r(check_expr(tcx, def_id, &params, from, &no_local));
+            r(check_expr(tcx, def_id, &params, to, &no_local));
         }
     }
     // `alloc` and `free` can fail the same way; report each message once.

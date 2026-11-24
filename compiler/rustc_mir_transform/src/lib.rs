@@ -39,6 +39,7 @@ use std::sync::LazyLock;
 use pass_manager::{self as pm, Lint, MirLint, MirPass, PassCtx, PassPolicy, WithMinOptLevel};
 
 mod check_pointers;
+mod cheri_vacates;
 mod cost_checker;
 mod cross_crate_inline;
 mod deduce_param_attrs;
@@ -591,6 +592,9 @@ fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &
     insert_cheri_loan_ends(tcx, def, &mut body);
 
     run_analysis_to_runtime_passes(tcx, &mut body);
+
+    // [LLM-generated] M7.3: `vacates` specs (no-op unless the CHERI spec switches are on).
+    cheri_vacates::lower_vacates(tcx, def, &mut body);
 
     tcx.alloc_steal_mir(body)
 }

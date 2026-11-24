@@ -1320,7 +1320,7 @@ impl<'a, K: 'a, V: 'a> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, mark
 
     /// Removes the key-value pair pointed to by this handle and returns it, along with the edge
     /// that the key-value pair collapsed into.
-    pub(super) fn remove(
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.node.node.keys, from = (old(self.node.node.len) - 1) * size_of::<K>(), to = old(self.node.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.node.node.vals, from = (old(self.node.node.len) - 1) * size_of::<V>(), to = old(self.node.node.len) * size_of::<V>())"] pub(super) fn remove(
         mut self,
     ) -> ((K, V), Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::Edge>) {
         let old_len = self.node.len();

@@ -406,6 +406,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             (SpecBinOp::Add, Const(a), Const(b)) => Const(a.wrapping_add(b)),
             (SpecBinOp::Sub, Const(a), Const(b)) => Const(a.wrapping_sub(b)),
             (SpecBinOp::Mul, Const(a), Const(b)) => Const(a.wrapping_mul(b)),
+            (SpecBinOp::Rem, Const(a), Const(b)) => Const(a % b.max(1)),
             (SpecBinOp::Mul, _, Const(0)) | (SpecBinOp::Mul, Const(0), _) => Const(0),
             (SpecBinOp::Mul, v, Const(1)) | (SpecBinOp::Mul, Const(1), v) => v,
             (SpecBinOp::Add | SpecBinOp::Sub, v, Const(0)) | (SpecBinOp::Add, Const(0), v) => v,
@@ -416,6 +417,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     SpecBinOp::Add => bx.add(x, y),
                     SpecBinOp::Sub => bx.sub(x, y),
                     SpecBinOp::Mul => bx.mul(x, y),
+                    SpecBinOp::Rem => {
+                        // A zero divisor would be UB in the IR; take it as 1.
+                        let zero = bx.const_usize(0);
+                        let one = bx.const_usize(1);
+                        let is0 = bx.icmp(IntPredicate::IntEQ, y, zero);
+                        let d = bx.select(is0, one, y);
+                        bx.urem(x, d)
+                    }
                 })
             }
         }
@@ -451,6 +460,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let y = self.spec_expr(bx, env, b)?;
                 Self::spec_bin(bx, *op, x, y)
             }
+            // `old(..)` only appears in `vacates`, which MIR building lowers.
+            SpecExpr::Old(_) => return None,
         })
     }
 
@@ -774,12 +785,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     let t = self.monomorphize(*t);
                     st.push(EVal::Const(self.spec_sized_size(t)?));
                 }
-                mir::CheriSpecItem::Add | mir::CheriSpecItem::Sub | mir::CheriSpecItem::Mul => {
+                mir::CheriSpecItem::Add
+                | mir::CheriSpecItem::Sub
+                | mir::CheriSpecItem::Mul
+                | mir::CheriSpecItem::Rem => {
                     let y = st.pop()?;
                     let x = st.pop()?;
                     let op = match it {
                         mir::CheriSpecItem::Add => SpecBinOp::Add,
                         mir::CheriSpecItem::Sub => SpecBinOp::Sub,
+                        mir::CheriSpecItem::Rem => SpecBinOp::Rem,
                         _ => SpecBinOp::Mul,
                     };
                     st.push(Self::spec_bin(bx, op, x, y));

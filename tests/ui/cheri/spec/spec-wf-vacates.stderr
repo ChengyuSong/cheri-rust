@@ -1,0 +1,32 @@
+error: malformed `rustc_cheri_spec`: `vacates` needs `to = ...`
+  --> $DIR/spec-wf-vacates.rs:33:26
+   |
+LL |     #[rustc_cheri_spec = "vacates(ty = T, block = self.ptr, from = self.len)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: `block = self.len`: `usize` is not a pointer
+  --> $DIR/spec-wf-vacates.rs:37:26
+   |
+LL |     #[rustc_cheri_spec = "vacates(ty = T, block = self.len, from = 0, to = 8)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid `rustc_cheri_spec`: no field `nope` on type `Buf<T>`
+  --> $DIR/spec-wf-vacates.rs:41:26
+   |
+LL |     #[rustc_cheri_spec = "vacates(ty = T, block = self.ptr, from = self.nope, to = 8)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: `old(..)` is only allowed in `vacates`, not in `frees`
+  --> $DIR/spec-wf-vacates.rs:45:26
+   |
+LL |     #[rustc_cheri_spec = "frees(block = self.ptr, size = old(self.cap))"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: expected an identifier
+  --> $DIR/spec-wf-vacates.rs:49:26
+   |
+LL |     #[rustc_cheri_spec = "frees(block = &self.ptr, size = self.cap)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 5 previous errors
+

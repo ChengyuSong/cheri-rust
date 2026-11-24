@@ -198,8 +198,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     SpecBinOp::Add => CheriSpecItem::Add,
                     SpecBinOp::Sub => CheriSpecItem::Sub,
                     SpecBinOp::Mul => CheriSpecItem::Mul,
+                    SpecBinOp::Rem => CheriSpecItem::Rem,
                 });
             }
+            SpecExpr::Old(_) => return Err("`old(..)` is only allowed in `vacates`".to_string()),
         }
         Ok(())
     }
@@ -251,8 +253,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     SpecBinOp::Add => CheriSpecItem::Add,
                     SpecBinOp::Sub => CheriSpecItem::Sub,
                     SpecBinOp::Mul => CheriSpecItem::Mul,
+                    SpecBinOp::Rem => CheriSpecItem::Rem,
                 });
             }
+            SpecExpr::Old(_) => return None,
         }
         Some(())
     }

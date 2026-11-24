@@ -534,6 +534,8 @@ pub enum CheriSpecItem<'tcx> {
     Add,
     Sub,
     Mul,
+    /// [LLM-generated] M7.3: unsigned remainder; a zero divisor is taken as 1.
+    Rem,
 }
 
 /// [LLM-generated] CHERI M7.2e: a byte count from a spec, in reverse Polish order.
@@ -549,6 +551,8 @@ pub enum CheriSpecStmt<'tcx> {
     /// Before the relocating call: the bytes `[block + live, block + size)` held only dead
     /// values of `held`. Codegen wipes their capability words if `held` may hold
     /// capabilities. No effect on execution otherwise.
+    /// [LLM-generated] M7.3: also emitted before each return of a function with a
+    /// `vacates` spec (block and `old(..)` operands are temporaries set on entry).
     WipeDead {
         block: Operand<'tcx>,
         live: CheriSpecExpr<'tcx>,
