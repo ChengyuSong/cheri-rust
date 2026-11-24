@@ -415,6 +415,11 @@ pub trait BuilderMethods<'a, 'tcx>:
     /// Attach `!mem.last_use !{loans}` to the next call/invoke built.
     fn set_next_call_mem_last_use(&mut self, _loans: &[u64]) {}
 
+    /// [LLM-generated] M7.3: `!mem.owning !{}` on a frame slot (an `alloca`) whose
+    /// type can only hold owning heap pointers, pointers to statics or function
+    /// pointers: no capability to a stack object can be stored in it. Default: none.
+    fn mem_owning_slot(&mut self, _alloca: Self::Value) {}
+
     /// `!mem.guard !{site}` on an access-address instruction (no-op for constants).
     fn mem_guard(&mut self, _inst: Self::Value, _site: u64) {}
 

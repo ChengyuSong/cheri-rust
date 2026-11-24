@@ -1168,6 +1168,14 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         *self.cx.mem_pending_last_use.borrow_mut() = Some(loans.to_vec());
     }
 
+    fn mem_owning_slot(&mut self, alloca: &'ll Value) {
+        if mem_off("owning") || unsafe { llvm::LLVMIsAAllocaInst(alloca) }.is_none() {
+            return;
+        }
+        let k = self.cx.get_md_kind_id("mem.owning");
+        self.cx.set_metadata_node(alloca, k, &[]);
+    }
+
     fn mem_guard(&mut self, inst: &'ll Value, site: u64) {
         if mem_off("guard") || unsafe { llvm::LLVMIsAInstruction(inst) }.is_none() {
             return;

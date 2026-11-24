@@ -2509,6 +2509,14 @@ options! {
         runtime nulls that slot when the block is freed and may still reuse the block. \
         A slot known to be misaligned (no tag can land) gets no fact. Default: no (the \
         M7.2n one-operand fact)"),
+    cheri_owning_slots: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.3: mark a local's frame slot `!mem.owning` when the local's \
+        type can only hold owning heap pointers (`Box`, `Vec`, `String`, `Rc`, `Arc`, \
+        `BTreeMap`, ... with the global allocator), pointers to statics or function \
+        pointers, and no reference, raw pointer or union; the late LLVM CHERI pass \
+        (`-cheri-invalidate-owning-slots`) then skips the scope-end range checks of \
+        that slot against dying frame objects. Default: yes (`no` emits nothing; CHERI \
+        targets only, also requires `-Zcheri-annotate`)"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],
