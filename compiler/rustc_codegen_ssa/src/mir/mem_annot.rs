@@ -1444,6 +1444,10 @@ pub(crate) struct MemStats {
     pub bytes_unknown: u32,
     /// [LLM-generated] M7.2n: `mem.escape_unknown` facts emitted.
     pub escape_unknown: u32,
+    /// [LLM-generated] M7.2o: of those, the (cap, slot) form, and the copies
+    /// skipped because the slot is known to be misaligned (no tag can land).
+    pub escape_slot: u32,
+    pub escape_slot_misaligned: u32,
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -1987,6 +1991,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 "MEM-NOREUSE\t{}\tescape_unknown={}\n",
                 tcx.symbol_name(self.instance).name,
                 s.escape_unknown
+            ));
+        }
+        // [LLM-generated] M7.2o: likewise only when non-zero.
+        if s.escape_slot != 0 || s.escape_slot_misaligned != 0 {
+            line.push_str(&format!(
+                "MEM-NOREUSE-SLOT\t{}\tescape_slot={}\tmisaligned={}\n",
+                tcx.symbol_name(self.instance).name,
+                s.escape_slot,
+                s.escape_slot_misaligned
             ));
         }
         if s.bytes_facts != 0 || s.bytes_unknown != 0 {
@@ -4662,7 +4675,10 @@ pub(crate) struct BytePlan {
     unknown: u32,
     /// [LLM-generated] M7.2n: for a copy of unknown length, the origins (local,
     /// offset in it) of the pointers it may carry.
-    unknown_caps: FxHashMap<usize, Vec<(mir::Local, u64)>>,
+    /// [LLM-generated] M7.2o: plus the pointer's byte offset in the destination
+    /// (`rel`), and whether that slot is known to be misaligned (the destination
+    /// is a 16-aligned local at a known offset, so no tag can land there).
+    unknown_caps: FxHashMap<usize, Vec<(mir::Local, u64, u64, bool)>>,
 }
 
 /// [LLM-generated] M7.2m: at most this many pointers per copy / per buffer.
@@ -4676,6 +4692,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// [LLM-generated] M7.2n: `-Zcheri-noreuse`, with the B2a emit filter.
     fn noreuse_enabled(&self) -> bool {
         self.cx.tcx().sess.opts.unstable_opts.cheri_noreuse && self.store_into_enabled()
+    }
+
+    /// [LLM-generated] M7.2o: `-Zcheri-noreuse-slots` (needs `-Zcheri-noreuse`).
+    fn noreuse_slots_enabled(&self) -> bool {
+        self.cx.tcx().sess.opts.unstable_opts.cheri_noreuse_slots && self.noreuse_enabled()
     }
 
     /// [LLM-generated] M7.2n: the pointer stored at byte `off` of local `l`
@@ -4742,11 +4763,29 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 self.mem_byte_plan.as_ref().and_then(|p| p.unknown_caps.get(&key)).cloned()
         {
             let cap_ty = bx.cx().val_ty(dst);
-            for (l, off) in origins {
+            // [LLM-generated] M7.2o: with -Zcheri-noreuse-slots, name the slot too
+            // (dst + rel): `mem.escape_unknown`(cap, slot). A slot known to be
+            // misaligned cannot receive a tag: no fact.
+            let slots = self.noreuse_slots_enabled();
+            for (l, off, rel, mis) in origins {
+                if slots && mis {
+                    self.mem_stats.escape_slot_misaligned += 1;
+                    continue;
+                }
                 if let Some(cap) = self.byte_origin_cap(bx, l, off, cap_ty)
                     && Self::store_into_value_is_cap(bx, cap)
                 {
-                    bx.mem_fact("mem.escape_unknown", &[cap]);
+                    if slots {
+                        let slot = if rel == 0 {
+                            dst
+                        } else {
+                            bx.gep(bx.cx().type_i8(), dst, &[bx.cx().const_usize(rel)])
+                        };
+                        bx.mem_fact("mem.escape_unknown", &[cap, slot]);
+                        self.mem_stats.escape_slot += 1;
+                    } else {
+                        bx.mem_fact("mem.escape_unknown", &[cap]);
+                    }
                     self.mem_stats.escape_unknown += 1;
                 }
             }
@@ -4916,7 +4955,21 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
         let Some(n) = self.byte_const_usize(&c.count, 0) else {
             plan.unknown += 1;
-            plan.unknown_caps.insert(key, held.iter().map(|&(_, ol, oo)| (ol, oo)).collect());
+            // [LLM-generated] M7.2o: the slot of each pointer in the destination.
+            let dst_al = self.byte_addr_of(&c.dst, 0).filter(|&(dl, _)| {
+                let lty = self.monomorphize(self.mir.local_decls[dl].ty);
+                self.cx.layout_of(lty).align.abi.bytes() >= 16
+            });
+            plan.unknown_caps.insert(
+                key,
+                held.iter()
+                    .map(|&(o, ol, oo)| {
+                        let rel = o - k;
+                        let mis = dst_al.is_some_and(|(_, kd)| (kd + rel) % 16 != 0);
+                        (ol, oo, rel, mis)
+                    })
+                    .collect(),
+            );
             return;
         };
         let entries: Vec<(u64, mir::Local, u64)> = held

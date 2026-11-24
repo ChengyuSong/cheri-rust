@@ -2501,6 +2501,14 @@ options! {
         an indirect call (fn pointer or `dyn` method) that is not the address of the \
         caller's own frame. User-crate functions only, like `-Zcheri-store-into`. Needs \
         the cheri_revoke runtime at link time. Default: no (nothing emitted)"),
+    cheri_noreuse_slots: bool = (false, parse_bool, [TRACKED],
+        "[LLM-generated] M7.2o: with `-Zcheri-noreuse`, a byte copy of unknown length \
+        also names the 16-byte slot each carried pointer lands in: \
+        `mem.escape_unknown`(cap, dst + off). The late LLVM CHERI pass \
+        (`-cheri-invalidate-noreuse-slots`) lowers it to `cheri_note_escape_slot`: the \
+        runtime nulls that slot when the block is freed and may still reuse the block. \
+        A slot known to be misaligned (no tag can land) gets no fact. Default: no (the \
+        M7.2n one-operand fact)"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],
