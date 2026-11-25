@@ -175,7 +175,7 @@ impl<T, A: Allocator> DoubleEndedIterator for Drain<'_, T, A> {
 
 #[stable(feature = "drain", since = "1.6.0")]
 impl<T, A: Allocator> Drop for Drain<'_, T, A> {
-    fn drop(&mut self) {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.vec.buf.inner.ptr, from = self.vec.len * size_of::<T>(), to = (old(self.tail_start) + old(self.tail_len)) * size_of::<T>())"] fn drop(&mut self) {
         /// Moves back the un-`Drain`ed elements to restore the original `Vec`.
         struct DropGuard<'r, 'a, T, A: Allocator>(&'r mut Drain<'a, T, A>);
 

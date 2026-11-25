@@ -1229,7 +1229,7 @@ impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> 
     /// Extracts the key and value that the KV handle refers to.
     /// # Safety
     /// The node that the handle refers to must not yet have been deallocated.
-    pub(super) unsafe fn into_key_val(mut self) -> (K, V) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.node.node.keys, from = old(self.idx) * size_of::<K>(), to = (old(self.idx) + 1) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.node.node.vals, from = old(self.idx) * size_of::<V>(), to = (old(self.idx) + 1) * size_of::<V>())"] pub(super) unsafe fn into_key_val(mut self) -> (K, V) {
         debug_assert!(self.idx < self.node.len());
         let leaf = self.node.as_leaf_dying();
         // ignore-tidy-undocumented-unsafe
@@ -1244,7 +1244,7 @@ impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> 
     /// # Safety
     /// The node that the handle refers to must not yet have been deallocated.
     #[inline]
-    pub(super) unsafe fn drop_key_val(mut self) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.node.node.keys, from = old(self.idx) * size_of::<K>(), to = (old(self.idx) + 1) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.node.node.vals, from = old(self.idx) * size_of::<V>(), to = (old(self.idx) + 1) * size_of::<V>())"] pub(super) unsafe fn drop_key_val(mut self) {
         // Run the destructor of the value even if the destructor of the key panics.
         struct Dropper<'a, T>(&'a mut MaybeUninit<T>);
         impl<T> Drop for Dropper<'_, T> {
@@ -1273,7 +1273,7 @@ impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> 
 impl<'a, K: 'a, V: 'a, NodeType> Handle<NodeRef<marker::Mut<'a>, K, V, NodeType>, marker::KV> {
     /// Helps implementations of `split` for a particular `NodeType`,
     /// by taking care of leaf data.
-    fn split_leaf_data(&mut self, new_node: &mut LeafNode<K, V>) -> (K, V) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.node.node.keys, from = self.node.node.len * size_of::<K>(), to = old(self.node.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.node.node.vals, from = self.node.node.len * size_of::<V>(), to = old(self.node.node.len) * size_of::<V>())"] fn split_leaf_data(&mut self, new_node: &mut LeafNode<K, V>) -> (K, V) {
         debug_assert!(self.idx < self.node.len());
         let old_len = self.node.len();
         let new_len = old_len - self.idx - 1;
@@ -1454,7 +1454,7 @@ impl<'a, K, V> BalancingContext<'a, K, V> {
 
 impl<'a, K: 'a, V: 'a> BalancingContext<'a, K, V> {
     /// Performs a merge and lets a closure decide what to return.
-    #[rustc_cheri_spec = "dealloc_of(ty = *self.left_child.node, or = *self.left_child.node.parent, fields)"] fn do_merge<
+    #[rustc_cheri_spec = "dealloc_of(ty = *self.left_child.node, or = *self.left_child.node.parent, fields)"] #[rustc_cheri_spec = "vacates(ty = K, block = &self.parent.node.node.keys, from = (old(self.parent.node.node.len) - 1) * size_of::<K>(), to = old(self.parent.node.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.parent.node.node.vals, from = (old(self.parent.node.node.len) - 1) * size_of::<V>(), to = old(self.parent.node.node.len) * size_of::<V>())"] fn do_merge<
         F: FnOnce(
             NodeRef<marker::Mut<'a>, K, V, marker::Internal>,
             NodeRef<marker::Mut<'a>, K, V, marker::LeafOrInternal>,
@@ -1592,7 +1592,7 @@ impl<'a, K: 'a, V: 'a> BalancingContext<'a, K, V> {
     }
 
     /// This does stealing similar to `steal_left` but steals multiple elements at once.
-    pub(super) fn bulk_steal_left(&mut self, count: usize) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.left_child.node.keys, from = self.left_child.node.len * size_of::<K>(), to = old(self.left_child.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.left_child.node.vals, from = self.left_child.node.len * size_of::<V>(), to = old(self.left_child.node.len) * size_of::<V>())"] pub(super) fn bulk_steal_left(&mut self, count: usize) {
         assert!(count > 0);
         // ignore-tidy-undocumented-unsafe
         unsafe {
@@ -1656,7 +1656,7 @@ impl<'a, K: 'a, V: 'a> BalancingContext<'a, K, V> {
     }
 
     /// The symmetric clone of `bulk_steal_left`.
-    pub(super) fn bulk_steal_right(&mut self, count: usize) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.right_child.node.keys, from = self.right_child.node.len * size_of::<K>(), to = old(self.right_child.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.right_child.node.vals, from = self.right_child.node.len * size_of::<V>(), to = old(self.right_child.node.len) * size_of::<V>())"] pub(super) fn bulk_steal_right(&mut self, count: usize) {
         assert!(count > 0);
         // ignore-tidy-undocumented-unsafe
         unsafe {

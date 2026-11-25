@@ -44,6 +44,9 @@ fn cheri_vacates_enabled(tcx: TyCtxt<'_>) -> bool {
 /// structs such as `NonNull` / `Unique` (copied out by a `Transmute` to a raw pointer
 /// first, as their field is a pattern type). Integer operands are read through
 /// single-field structs (`WrappedIndex`) and widened to `usize`.
+///
+/// [LLM-generated] M7.3b: with `ring = R` the range is split at the end of the ring into
+/// two `WipeDead`s (the second one is empty unless the range wraps).
 pub(crate) fn lower_vacates<'tcx>(
     tcx: TyCtxt<'tcx>,
     def: rustc_span::def_id::LocalDefId,
@@ -235,7 +238,7 @@ impl<'a, 'tcx> Vac<'a, 'tcx> {
         exit: &mut Vec<Statement<'tcx>>,
     ) -> Result<(), String> {
         let tcx = self.tcx;
-        let CheriSpec::Vacates { ty, block, addr, from, to } = spec else { return Ok(()) };
+        let CheriSpec::Vacates { ty, block, addr, from, to, ring } = spec else { return Ok(()) };
         let held = self.ty(ty)?;
         let bplace = self.place(block, entry)?;
         let bt = self.ty_of(bplace);
@@ -261,6 +264,35 @@ impl<'a, 'tcx> Vac<'a, 'tcx> {
         self.expr(from, false, entry, exit, &mut live)?;
         let mut size = Vec::new();
         self.expr(to, false, entry, exit, &mut size)?;
+        let Some(ring) = ring else {
+            self.wipe(exit, bl, live, size, held);
+            return Ok(());
+        };
+        // [LLM-generated] M7.3b: `[from, to)` mod `ring` (`R`): with `a = from % R`,
+        // `n = to - from` and `m = min(n, R - a)`, wipe `[a, a + m)` and `[0, n - m)`.
+        let mut r = Vec::new();
+        self.expr(ring, false, entry, exit, &mut r)?;
+        let cat = |parts: &[&[CheriSpecItem<'tcx>]]| -> Vec<CheriSpecItem<'tcx>> {
+            parts.iter().flat_map(|p| p.iter().cloned()).collect()
+        };
+        use CheriSpecItem as I;
+        let a = cat(&[&live, &r, &[I::Rem]]);
+        let n = cat(&[&size, &live, &[I::Sub]]);
+        let m = cat(&[&n, &r, &a, &[I::Sub, I::Min]]);
+        self.wipe(exit, bl, a.clone(), cat(&[&a, &m, &[I::Add]]), held);
+        self.wipe(exit, bl, vec![I::Const(0)], cat(&[&n, &m, &[I::Sub]]), held);
+        Ok(())
+    }
+
+    /// `WipeDead { block, live, size, held }` at the end of `exit`.
+    fn wipe(
+        &mut self,
+        exit: &mut Vec<Statement<'tcx>>,
+        bl: Local,
+        live: Vec<CheriSpecItem<'tcx>>,
+        size: Vec<CheriSpecItem<'tcx>>,
+        held: Ty<'tcx>,
+    ) {
         exit.push(Statement::new(
             self.si(),
             StatementKind::Intrinsic(Box::new(NonDivergingIntrinsic::CheriSpec(Box::new(
@@ -272,7 +304,6 @@ impl<'a, 'tcx> Vac<'a, 'tcx> {
                 },
             )))),
         ));
-        Ok(())
     }
 }
 
