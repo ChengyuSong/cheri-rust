@@ -26,6 +26,9 @@
 //! `old(expr)` (only inside `vacates`) and the operator `%` (same precedence as `*`).
 //! `block` may also be written `&place` there (the address of a field, e.g. a node's
 //! key array). See [`CheriSpec::Vacates`].
+//!
+//! [LLM-generated] M7.3b: `vacates` also takes `ring = expr`, the byte size of a ring
+//! buffer (`VecDeque`), for a vacated range that may wrap around its end.
 
 use rustc_attr_ir::find_attr;
 use rustc_hir::def::DefKind;
@@ -125,7 +128,19 @@ pub enum CheriSpec {
     /// function's own MIR gets a `WipeDead` before each return, so the wipe survives
     /// MIR inlining. The spec is trusted: `from <= to` on every return and the range
     /// lies in the block's allocation whenever it is non-empty.
-    Vacates { ty: SpecTy, block: SpecPlace, addr: bool, from: SpecExpr, to: SpecExpr },
+    ///
+    /// [LLM-generated] M7.3b: `ring`: the block is a ring buffer of `ring` bytes and
+    /// `[from, to)` are logical byte offsets that may run past its end; the vacated bytes
+    /// are `[from % ring, ..)` and, when they wrap, `[0, ..)` (two wipes). Trusted:
+    /// `to - from <= ring`.
+    Vacates {
+        ty: SpecTy,
+        block: SpecPlace,
+        addr: bool,
+        from: SpecExpr,
+        to: SpecExpr,
+        ring: Option<SpecExpr>,
+    },
 }
 
 impl CheriSpec {
@@ -356,7 +371,7 @@ pub fn parse_spec(s: &str) -> Result<CheriSpec, String> {
         "live" => &["block", "bytes", "held", "ty"],
         "retains" | "borrows" => &[],
         "stores" => &["into"],
-        "vacates" => &["ty", "block", "from", "to"],
+        "vacates" => &["ty", "block", "from", "to", "ring"],
         _ => {
             return Err(format!(
                 "unknown spec `{form}`; expected one of `frees`, `dealloc_of`, `relocates`, `live`, `retains`, `borrows`, `stores`, `vacates`"
@@ -502,6 +517,7 @@ pub fn parse_spec(s: &str) -> Result<CheriSpec, String> {
                 addr: block_addr,
                 from: as_e(need(take("from"), "from")?),
                 to: as_e(need(take("to"), "to")?),
+                ring: take("ring").map(as_e),
             }
         }
         _ => unreachable!(),
@@ -529,7 +545,9 @@ fn spec_has_old(s: &CheriSpec) -> bool {
         CheriSpec::DeallocOf { size, .. } => size.as_ref().is_some_and(expr_has_old),
         CheriSpec::Relocates { size, keep, .. } => expr_has_old(size) || expr_has_old(keep),
         CheriSpec::Live { bytes, .. } => expr_has_old(bytes),
-        CheriSpec::Vacates { from, to, .. } => expr_has_old(from) || expr_has_old(to),
+        CheriSpec::Vacates { from, to, ring, .. } => {
+            expr_has_old(from) || expr_has_old(to) || ring.as_ref().is_some_and(expr_has_old)
+        }
         CheriSpec::Retains(_) | CheriSpec::Borrows(_) | CheriSpec::Stores { .. } => false,
     }
 }
@@ -878,7 +896,7 @@ pub fn check_fn_spec<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, spec: &CheriSpec) -
             }
             r(check_block(tcx, &params, into, &no_local));
         }
-        CheriSpec::Vacates { ty, block, addr, from, to } => {
+        CheriSpec::Vacates { ty, block, addr, from, to, ring } => {
             r(spec_ty(tcx, def_id, &params, ty, &no_local).map(|_| ()));
             if *addr {
                 r(place_ty_any(tcx, &params, block, &no_local).map(|_| ()));
@@ -887,6 +905,9 @@ pub fn check_fn_spec<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, spec: &CheriSpec) -
             }
             r(check_expr(tcx, def_id, &params, from, &no_local));
             r(check_expr(tcx, def_id, &params, to, &no_local));
+            if let Some(ring) = ring {
+                r(check_expr(tcx, def_id, &params, ring, &no_local));
+            }
         }
     }
     // `alloc` and `free` can fail the same way; report each message once.

@@ -1,0 +1,20 @@
+error: invalid `rustc_cheri_spec`: no field `nope` on type `Ring<T>`
+  --> $DIR/spec-wf-vacates-ring.rs:24:26
+   |
+LL |     #[rustc_cheri_spec = "vacates(ty = T, block = self.ptr, from = 0, to = 8, ring = self.nope)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: duplicate key `ring` in `vacates`
+  --> $DIR/spec-wf-vacates-ring.rs:28:26
+   |
+LL |     #[rustc_cheri_spec = "vacates(ty = T, block = self.ptr, from = 0, to = 8, ring = 4, ring = 8)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: malformed `rustc_cheri_spec`: unknown key `ring` in `frees`
+  --> $DIR/spec-wf-vacates-ring.rs:32:26
+   |
+LL |     #[rustc_cheri_spec = "frees(block = self.ptr, size = self.cap, ring = 8)"]
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 3 previous errors
+

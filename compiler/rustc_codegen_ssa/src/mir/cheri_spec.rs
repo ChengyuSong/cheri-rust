@@ -799,6 +799,19 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     };
                     st.push(Self::spec_bin(bx, op, x, y));
                 }
+                mir::CheriSpecItem::Min => {
+                    let y = st.pop()?;
+                    let x = st.pop()?;
+                    st.push(match (x, y) {
+                        (EVal::Const(a), EVal::Const(b)) => EVal::Const(a.min(b)),
+                        (x, y) => {
+                            let x = Self::ev(bx, x);
+                            let y = Self::ev(bx, y);
+                            let lt = bx.icmp(IntPredicate::IntULT, x, y);
+                            EVal::Val(bx.select(lt, x, y))
+                        }
+                    });
+                }
             }
         }
         if st.len() == 1 { st.pop() } else { None }

@@ -536,6 +536,8 @@ pub enum CheriSpecItem<'tcx> {
     Mul,
     /// [LLM-generated] M7.3: unsigned remainder; a zero divisor is taken as 1.
     Rem,
+    /// [LLM-generated] M7.3b: unsigned minimum (only from the `ring` split of `vacates`).
+    Min,
 }
 
 /// [LLM-generated] CHERI M7.2e: a byte count from a spec, in reverse Polish order.
