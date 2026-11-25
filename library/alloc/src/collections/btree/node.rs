@@ -1229,7 +1229,7 @@ impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> 
     /// Extracts the key and value that the KV handle refers to.
     /// # Safety
     /// The node that the handle refers to must not yet have been deallocated.
-    pub(super) unsafe fn into_key_val(mut self) -> (K, V) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.node.node.keys, from = old(self.idx) * size_of::<K>(), to = (old(self.idx) + 1) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.node.node.vals, from = old(self.idx) * size_of::<V>(), to = (old(self.idx) + 1) * size_of::<V>())"] pub(super) unsafe fn into_key_val(mut self) -> (K, V) {
         debug_assert!(self.idx < self.node.len());
         let leaf = self.node.as_leaf_dying();
         // ignore-tidy-undocumented-unsafe
@@ -1244,7 +1244,7 @@ impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> 
     /// # Safety
     /// The node that the handle refers to must not yet have been deallocated.
     #[inline]
-    pub(super) unsafe fn drop_key_val(mut self) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.node.node.keys, from = old(self.idx) * size_of::<K>(), to = (old(self.idx) + 1) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.node.node.vals, from = old(self.idx) * size_of::<V>(), to = (old(self.idx) + 1) * size_of::<V>())"] pub(super) unsafe fn drop_key_val(mut self) {
         // Run the destructor of the value even if the destructor of the key panics.
         struct Dropper<'a, T>(&'a mut MaybeUninit<T>);
         impl<T> Drop for Dropper<'_, T> {
