@@ -1454,7 +1454,7 @@ impl<'a, K, V> BalancingContext<'a, K, V> {
 
 impl<'a, K: 'a, V: 'a> BalancingContext<'a, K, V> {
     /// Performs a merge and lets a closure decide what to return.
-    #[rustc_cheri_spec = "dealloc_of(ty = *self.left_child.node, or = *self.left_child.node.parent, fields)"] fn do_merge<
+    #[rustc_cheri_spec = "dealloc_of(ty = *self.left_child.node, or = *self.left_child.node.parent, fields)"] #[rustc_cheri_spec = "vacates(ty = K, block = &self.parent.node.node.keys, from = (old(self.parent.node.node.len) - 1) * size_of::<K>(), to = old(self.parent.node.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.parent.node.node.vals, from = (old(self.parent.node.node.len) - 1) * size_of::<V>(), to = old(self.parent.node.node.len) * size_of::<V>())"] fn do_merge<
         F: FnOnce(
             NodeRef<marker::Mut<'a>, K, V, marker::Internal>,
             NodeRef<marker::Mut<'a>, K, V, marker::LeafOrInternal>,
@@ -1592,7 +1592,7 @@ impl<'a, K: 'a, V: 'a> BalancingContext<'a, K, V> {
     }
 
     /// This does stealing similar to `steal_left` but steals multiple elements at once.
-    pub(super) fn bulk_steal_left(&mut self, count: usize) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.left_child.node.keys, from = self.left_child.node.len * size_of::<K>(), to = old(self.left_child.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.left_child.node.vals, from = self.left_child.node.len * size_of::<V>(), to = old(self.left_child.node.len) * size_of::<V>())"] pub(super) fn bulk_steal_left(&mut self, count: usize) {
         assert!(count > 0);
         // ignore-tidy-undocumented-unsafe
         unsafe {
@@ -1656,7 +1656,7 @@ impl<'a, K: 'a, V: 'a> BalancingContext<'a, K, V> {
     }
 
     /// The symmetric clone of `bulk_steal_left`.
-    pub(super) fn bulk_steal_right(&mut self, count: usize) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.right_child.node.keys, from = self.right_child.node.len * size_of::<K>(), to = old(self.right_child.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.right_child.node.vals, from = self.right_child.node.len * size_of::<V>(), to = old(self.right_child.node.len) * size_of::<V>())"] pub(super) fn bulk_steal_right(&mut self, count: usize) {
         assert!(count > 0);
         // ignore-tidy-undocumented-unsafe
         unsafe {

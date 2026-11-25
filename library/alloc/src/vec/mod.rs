@@ -3182,7 +3182,7 @@ impl<T, A: Allocator> Vec<T, A> {
     #[must_use = "use `.truncate()` if you don't need the other half"]
     #[stable(feature = "split_off", since = "1.4.0")]
     #[track_caller]
-    pub fn split_off(&mut self, at: usize) -> Self
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn split_off(&mut self, at: usize) -> Self
     where
         A: Clone,
     {

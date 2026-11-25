@@ -1471,7 +1471,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// ```
     #[doc(alias = "retain_front")]
     #[stable(feature = "deque_extras", since = "1.16.0")]
-    pub fn truncate(&mut self, len: usize) {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = (old(self.head) + self.len) * size_of::<T>(), to = (old(self.head) + old(self.len)) * size_of::<T>(), ring = self.buf.inner.cap * size_of::<T>())"] pub fn truncate(&mut self, len: usize) {
         if len >= self.len {
             return;
         }
