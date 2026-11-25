@@ -1273,7 +1273,7 @@ impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> 
 impl<'a, K: 'a, V: 'a, NodeType> Handle<NodeRef<marker::Mut<'a>, K, V, NodeType>, marker::KV> {
     /// Helps implementations of `split` for a particular `NodeType`,
     /// by taking care of leaf data.
-    fn split_leaf_data(&mut self, new_node: &mut LeafNode<K, V>) -> (K, V) {
+    #[rustc_cheri_spec = "vacates(ty = K, block = &self.node.node.keys, from = self.node.node.len * size_of::<K>(), to = old(self.node.node.len) * size_of::<K>())"] #[rustc_cheri_spec = "vacates(ty = V, block = &self.node.node.vals, from = self.node.node.len * size_of::<V>(), to = old(self.node.node.len) * size_of::<V>())"] fn split_leaf_data(&mut self, new_node: &mut LeafNode<K, V>) -> (K, V) {
         debug_assert!(self.idx < self.node.len());
         let old_len = self.node.len();
         let new_len = old_len - self.idx - 1;
