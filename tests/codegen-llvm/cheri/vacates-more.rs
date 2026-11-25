@@ -8,6 +8,8 @@
 // (`steal_left` / `steal_right` call them) and `do_merge` (the parent's vacated KV slot).
 // Library MIR is built with the library's flags, so those wipes are in both revisions;
 // `-Zcheri-spec-vacates=no` only turns off the local spec.
+// M7.3b [LLM-generated]: the local `ring` spec checks are in `vacates-ring.rs` (a local item's
+// place among the library's functions in the output depends on this crate's hash).
 //
 //@ revisions: on off
 //@ compile-flags: -Copt-level=0 -Cdebuginfo=0
@@ -23,25 +25,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
-use core::ptr::NonNull;
 
 // B-tree merge (via `BTreeMap::remove`): the parent's vacated value slot (`Box<u64>`).
 // CHECK-LABEL: define {{.*}}BalancingContext{{.*}}8do_merge
 // CHECK: mem.wipe_cap_words
-// The local ring spec: two wipes, the second from the start of the block.
-// on-LABEL: define {{.*}}RingINtNtCs{{.*}}BoxyEE8truncate
-// on: urem
-// on: select
-// on: mem.wipe_cap_words
-// on: mem.wipe_cap_words"(ptr addrspace(200) %{{.*}}, i64
-// on: ret void
-// off-LABEL: define {{.*}}RingINtNtCs{{.*}}BoxyEE8truncate
-// off-NOT: mem.wipe_cap_words
-// off: ret void
-// Plain data in a ring: no fact in either revision.
-// CHECK-LABEL: define {{.*}}RingyE8truncate
-// CHECK-NOT: mem.wipe_cap_words
-// CHECK: ret void
 // B-tree steals: the vacated value slots of the child that gave up elements.
 // CHECK-LABEL: define {{.*}}BalancingContext{{.*}}15bulk_steal_left
 // CHECK: mem.wipe_cap_words
@@ -56,34 +43,6 @@ use core::ptr::NonNull;
 // CHECK: mem.wipe_cap_words
 // CHECK-LABEL: define {{.*}}DrainINtNtB{{.*}}BoxyEE{{.*}}Drop4drop
 // CHECK: mem.wipe_cap_words
-#[allow(dead_code)]
-pub struct Ring<T> {
-    ptr: NonNull<T>,
-    head: usize,
-    len: usize,
-    cap: usize,
-}
-
-impl<T> Ring<T> {
-    #[inline(never)]
-    #[rustc_cheri_spec = "vacates(ty = T, block = self.ptr, from = (old(self.head) + self.len) * size_of::<T>(), to = (old(self.head) + old(self.len)) * size_of::<T>(), ring = self.cap * size_of::<T>())"]
-    pub fn truncate(&mut self, len: usize) {
-        if len < self.len {
-            self.len = len;
-        }
-    }
-}
-
-#[no_mangle]
-pub fn ring_truncate(r: &mut Ring<Box<u64>>, n: usize) {
-    r.truncate(n)
-}
-
-#[no_mangle]
-pub fn ring_truncate_plain(r: &mut Ring<u64>, n: usize) {
-    r.truncate(n)
-}
-
 #[no_mangle]
 pub fn deque_truncate(d: &mut VecDeque<Box<u64>>, n: usize) {
     d.truncate(n)
