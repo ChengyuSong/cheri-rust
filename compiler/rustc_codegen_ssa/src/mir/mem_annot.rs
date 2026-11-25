@@ -5159,3 +5159,97 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         Some((base, off))
     }
 }
+
+// [LLM-generated] M7.3: owning-only frame slots (`-Zcheri-owning-slots`).
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+    /// Mark the frame slot of a memory local `!mem.owning` when its type can only
+    /// hold owning heap pointers, pointers to statics or function pointers (see
+    /// `owning_only_ty`), and holds at least one capability. The fact is about the
+    /// slot's own bytes: a `Vec<&T>` slot holds the heap buffer pointer, length and
+    /// capacity, so it qualifies; the `&T` elements live in the heap buffer.
+    pub(crate) fn mem_owning_slot(&self, bx: &mut Bx, place: super::place::PlaceRef<'tcx, Bx::Value>) {
+        if !self.mem_annotate() || !bx.tcx().sess.opts.unstable_opts.cheri_owning_slots {
+            return;
+        }
+        if self.owning_only_ty(bx.tcx(), place.layout.ty, 0) == Some(true) {
+            bx.mem_owning_slot(place.val.llval);
+        }
+    }
+
+    /// `Some(has_cap)` if every value of `ty` stores in its own bytes only owning heap
+    /// pointers (global allocator), pointers to statics or function pointers; `None`
+    /// if it may store a reference, a raw pointer (which may point into a frame), a
+    /// union's bytes (`MaybeUninit`) or something not understood. Library container
+    /// invariants are trusted: `Box`, `Vec`, `String`, `Rc`, `Arc`, the collections
+    /// with `A = Global` point to blocks of the global heap (or are dangling).
+    fn owning_only_ty(&self, tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, depth: u32) -> Option<bool> {
+        if depth > 8 {
+            return None;
+        }
+        match *ty.kind() {
+            ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Never => Some(false),
+            ty::FnDef(..) => Some(false),
+            ty::FnPtr(..) => Some(true),
+            ty::Array(t, _) => self.owning_only_ty(tcx, t, depth + 1),
+            ty::Tuple(ts) => {
+                let mut cap = false;
+                for t in ts.iter() {
+                    cap |= self.owning_only_ty(tcx, t, depth + 1)?;
+                }
+                Some(cap)
+            }
+            ty::Closure(_, args) => {
+                self.owning_only_ty(tcx, args.as_closure().tupled_upvars_ty(), depth + 1)
+            }
+            ty::Adt(def, args) => {
+                if def.is_union() {
+                    return None;
+                }
+                if def.is_box() {
+                    return Self::owning_global_alloc(tcx, args.type_at(1)).then_some(true);
+                }
+                if let Some(ok) = Self::owning_container(tcx, def.did(), args) {
+                    return ok.then_some(true);
+                }
+                let mut cap = false;
+                for f in def.all_fields() {
+                    let fty = tcx.normalize_erasing_regions(
+                        ty::TypingEnv::fully_monomorphized(),
+                        ty::Unnormalized::new_wip(f.ty(tcx, args).skip_norm_wip()),
+                    );
+                    cap |= self.owning_only_ty(tcx, fty, depth + 1)?;
+                }
+                Some(cap)
+            }
+            _ => None,
+        }
+    }
+
+    fn owning_global_alloc(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+        matches!(*ty.kind(), ty::Adt(d, _)
+            if tcx.crate_name(d.did().krate) == sym::alloc && tcx.item_name(d.did()).as_str() == "Global")
+    }
+
+    /// `Some(true)`: an `alloc` owning container with the global allocator (or none);
+    /// `Some(false)`: the same container with another allocator (it may hand out
+    /// blocks of a frame arena); `None`: not one of them.
+    fn owning_container(tcx: TyCtxt<'tcx>, did: DefId, args: ty::GenericArgsRef<'tcx>) -> Option<bool> {
+        if tcx.crate_name(did.krate) != sym::alloc {
+            return None;
+        }
+        const OWNERS: &[&str] = &[
+            "Vec", "String", "Rc", "Arc", "Weak", "BTreeMap", "BTreeSet", "VecDeque",
+            "LinkedList", "BinaryHeap",
+        ];
+        if !OWNERS.contains(&tcx.item_name(did).as_str()) {
+            return None;
+        }
+        let g = tcx.generics_of(did);
+        for p in &g.own_params {
+            if p.name.as_str() == "A" && matches!(p.kind, ty::GenericParamDefKind::Type { .. }) {
+                return Some(Self::owning_global_alloc(tcx, args.type_at(p.index as usize)));
+            }
+        }
+        Some(true)
+    }
+}

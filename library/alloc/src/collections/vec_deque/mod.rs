@@ -2239,7 +2239,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// assert_eq!(d.pop_front(), None);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn pop_front(&mut self) -> Option<T> {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = old(self.head) * size_of::<T>(), to = (old(self.head) + old(self.len) - self.len) * size_of::<T>())"] pub fn pop_front(&mut self) -> Option<T> {
         if self.is_empty() {
             None
         } else {
@@ -2269,7 +2269,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// assert_eq!(buf.pop_back(), Some(3));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn pop_back(&mut self) -> Option<T> {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = ((self.head + self.len) % self.buf.inner.cap) * size_of::<T>(), to = ((self.head + self.len) % self.buf.inner.cap + old(self.len) - self.len) * size_of::<T>())"] pub fn pop_back(&mut self) -> Option<T> {
         if self.is_empty() {
             None
         } else {

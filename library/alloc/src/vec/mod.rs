@@ -1801,7 +1801,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// [`clear`]: Vec::clear
     /// [`drain`]: Vec::drain
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn truncate(&mut self, len: usize) {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn truncate(&mut self, len: usize) {
         // SAFETY: `BufWriter::flush_buf` assumes that this will not
         // de-initialize any elements of the spare capacity.
 
@@ -2246,7 +2246,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn swap_remove(&mut self, index: usize) -> T {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn swap_remove(&mut self, index: usize) -> T {
         #[cold]
         #[cfg_attr(not(panic = "immediate-abort"), inline(never))]
         #[optimize(size)]
@@ -2392,7 +2392,7 @@ impl<T, A: Allocator> Vec<T, A> {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[track_caller]
     #[rustc_confusables("delete", "take")]
-    pub fn remove(&mut self, index: usize) -> T {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn remove(&mut self, index: usize) -> T {
         #[cold]
         #[cfg_attr(not(panic = "immediate-abort"), inline(never))]
         #[track_caller]
@@ -2503,7 +2503,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// assert_eq!(vec, [2, 3, 4]);
     /// ```
     #[stable(feature = "vec_retain_mut", since = "1.61.0")]
-    pub fn retain_mut<F>(&mut self, mut f: F)
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn retain_mut<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut T) -> bool,
     {
@@ -2682,7 +2682,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// assert_eq!(ranges, [1..5, 8..9]);
     /// ```
     #[stable(feature = "dedup_by", since = "1.16.0")]
-    pub fn dedup_by<F>(&mut self, mut same_bucket: F)
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn dedup_by<F>(&mut self, mut same_bucket: F)
     where
         F: FnMut(&mut T, &mut T) -> bool,
     {
@@ -2886,7 +2886,7 @@ impl<T, A: Allocator> Vec<T, A> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_diagnostic_item = "vec_pop"]
-    pub fn pop(&mut self) -> Option<T> {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             None
         } else {
@@ -3092,7 +3092,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn clear(&mut self) {
+    #[rustc_cheri_spec = "vacates(ty = T, block = self.buf.inner.ptr, from = self.len * size_of::<T>(), to = old(self.len) * size_of::<T>())"] pub fn clear(&mut self) {
         // Though this is equivalent to `truncate(0)`, the manual version
         // optimizes better, justifying the additional complexity
         // (see #96002 and #154095 for context).

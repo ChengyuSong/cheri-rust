@@ -439,7 +439,10 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 if layout.is_unsized() {
                     LocalRef::UnsizedPlace(PlaceRef::alloca_unsized_indirect(&mut start_bx, layout))
                 } else {
-                    LocalRef::Place(PlaceRef::alloca(&mut start_bx, layout))
+                    let place = PlaceRef::alloca(&mut start_bx, layout);
+                    // [LLM-generated] M7.3: owning-only slot fact.
+                    fx.mem_owning_slot(&mut start_bx, place);
+                    LocalRef::Place(place)
                 }
             } else {
                 debug!("alloc: {:?} -> operand", local);
@@ -697,6 +700,8 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 }
                 _ => {
                     let tmp = PlaceRef::alloca(bx, arg.layout);
+                    // [LLM-generated] M7.3: owning-only slot fact (by-value argument spill).
+                    fx.mem_owning_slot(bx, tmp);
                     bx.store_fn_arg(arg, &mut llarg_idx, tmp);
                     LocalRef::Place(tmp)
                 }

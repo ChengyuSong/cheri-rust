@@ -1200,6 +1200,8 @@ unsafe extern "C" {
     pub(crate) fn LLVMGetNextInstruction(Inst: &Value) -> Option<&Value>;
     pub(crate) fn LLVMGetInstructionParent(Inst: &Value) -> &BasicBlock;
     pub(crate) fn LLVMIsALoadInst(Val: &Value) -> Option<&Value>;
+    // [LLM-generated] M7.3: `!mem.owning` goes on allocas only.
+    pub(crate) fn LLVMIsAAllocaInst(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsAStoreInst(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsACallInst(Val: &Value) -> Option<&Value>;
     // M5r R6 (D42)

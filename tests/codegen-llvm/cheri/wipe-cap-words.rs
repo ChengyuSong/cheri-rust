@@ -82,6 +82,11 @@ pub fn shrink0_vec_str(v: &mut Vec<&str>) {
 // on: "mem.wipe_cap_words"
 // on: <alloc::raw_vec::RawVec<u8>>::finish_grow_wipe
 // on-NOT: "mem.wipe_cap_words"
+// M7.3 [LLM-generated]: `Vec::truncate` carries a `vacates` spec; for `&str` elements its
+// monomorphic copy wipes the vacated slots `[len, old_len)`.
+// on: <alloc::vec::Vec<&str>>::truncate
+// on: "mem.wipe_cap_words"
+// on-NOT: "mem.wipe_cap_words"
 // on: <alloc::raw_vec::RawVec<alloc::rc::Rc<u32>> as core::ops::drop::Drop>::drop
 // on: "mem.wipe_cap_words"
 // on: <alloc::raw_vec::RawVec<&str> as core::ops::drop::Drop>::drop

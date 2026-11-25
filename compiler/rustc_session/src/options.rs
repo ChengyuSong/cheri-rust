@@ -2509,6 +2509,14 @@ options! {
         runtime nulls that slot when the block is freed and may still reuse the block. \
         A slot known to be misaligned (no tag can land) gets no fact. Default: no (the \
         M7.2n one-operand fact)"),
+    cheri_owning_slots: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.3: mark a local's frame slot `!mem.owning` when the local's \
+        type can only hold owning heap pointers (`Box`, `Vec`, `String`, `Rc`, `Arc`, \
+        `BTreeMap`, ... with the global allocator), pointers to statics or function \
+        pointers, and no reference, raw pointer or union; the late LLVM CHERI pass \
+        (`-cheri-invalidate-owning-slots`) then skips the scope-end range checks of \
+        that slot against dying frame objects. Default: yes (`no` emits nothing; CHERI \
+        targets only, also requires `-Zcheri-annotate`)"),
     cheri_store_into: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] M7.1d B2a: emit `mem.store_into`(dest, cap) facts at          nameable local destinations of `ptr::read` / `ptr::write` and stores into          a field of a live local struct, for the late LLVM CHERI pass to null at          the source `mem.free` (default: yes; `no` is byte-identical to f88cb241;          CHERI targets only, also requires `-Zcheri-annotate`)"),
     cheri_ffi_narrow: bool = (true, parse_bool, [TRACKED],
@@ -2570,6 +2578,14 @@ options! {
         `no` builds the MIR unchanged. The MIR is built in the crate that defines the \
         call (with build-std: the user's flags); also needs `-Zcheri-spec`, \
         `-Zcheri-wipe-alloc-hints`, `-Zcheri-wipe-cap-words` and `-Zcheri-annotate`"),
+    cheri_spec_vacates: bool = (true, parse_bool, [TRACKED],
+        "[LLM-generated] M7.3: lower `vacates(ty, block, from, to)` specs (on the library's \
+        Vec / VecDeque / BTree removal methods) to a wipe of the vacated element bytes \
+        before each return of the annotated function, so stale capabilities past `len` \
+        are cleared. Default: yes; `no` builds the MIR unchanged. The MIR is built in the \
+        crate that defines the function (with build-std: the user's flags); also needs \
+        `-Zcheri-spec`, `-Zcheri-wipe-alloc-hints`, `-Zcheri-wipe-cap-words` and \
+        `-Zcheri-annotate`"),
     cheri_slot_start_strict: bool = (true, parse_bool, [TRACKED],
         "[LLM-generated] CHERI M5r R8 (D64): a loan start tags only the assignment right \
         after it in the same source scope (`no`: the R5-R7 next `Ref` of the block)"),

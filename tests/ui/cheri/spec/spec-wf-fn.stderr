@@ -4,7 +4,7 @@ error: malformed `rustc_cheri_spec`: expected `,`
 LL | #[rustc_cheri_spec = "frees(block = ptr"]
    |                      ^^^^^^^^^^^^^^^^^^^
 
-error: malformed `rustc_cheri_spec`: unknown spec `wipes`; expected one of `frees`, `dealloc_of`, `relocates`, `live`, `retains`, `borrows`, `stores`
+error: malformed `rustc_cheri_spec`: unknown spec `wipes`; expected one of `frees`, `dealloc_of`, `relocates`, `live`, `retains`, `borrows`, `stores`, `vacates`
   --> $DIR/spec-wf-fn.rs:40:22
    |
 LL | #[rustc_cheri_spec = "wipes(block = ptr, size = 8)"]
